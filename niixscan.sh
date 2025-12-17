@@ -150,8 +150,8 @@ declare -A TOOL_PATHS=(
 initialize_platform() {
     echo -e "${PURPLE}"
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║              		  NiiXscan v3.0 - Initializing     	    		      ║"
-    echo "║         				   Security Platform     						  ║"
+    echo "║              NiiXscan v3.0 - Initializing     	     ║"
+    echo "║         		    Security Platform     	         ║"
     echo "╚══════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     

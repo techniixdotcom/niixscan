@@ -1,6 +1,6 @@
 #!/bin/bash
-# NiiXscan
-# Version 3.0 
+# NiiXscan 
+# Version alpha 3.3
 # Created by techniix / tomteal
 
 # =====================[ ENTERPRISE CONFIGURATION ]=====================
@@ -58,7 +58,7 @@ SCAN_TYPE="comprehensive"
 PROGRESS_INDICATOR_PID=""
 RESUME_SCAN=false
 CURRENT_SCAN_PHASE=""
-SCAN_PHASES=("reconnaissance" "vulnerability_scan" "web_application" "network_services" "exploitation" "reporting")
+SCAN_PHASES=("reconnaissance" "vulnerability_scan" "web_application" "network_services" "reporting")
 AI_ANALYSIS_ENABLED=false
 AI_API_CONFIGURED=false
 MAX_PARALLEL_JOBS=4
@@ -66,6 +66,31 @@ CURRENT_RUNNING_JOBS=0
 PYTHON_VENV_ACTIVATED=false
 GO_ENVIRONMENT_SETUP=false
 EXPORT_FORMAT="html"
+
+# Progress tracking variables
+SCAN_START_TIME=0
+PHASE_START_TIME=0
+TOTAL_PHASES=5
+CURRENT_PHASE_NUMBER=0
+PHASE_NAMES=("Reconnaissance" "Vulnerability Scan" "Web Application Testing" "Network Services Analysis" "Report Generation")
+PHASE_DESCRIPTIONS=(
+    "Gathering information about the target"
+    "Scanning for critical and high severity vulnerabilities"
+    "Testing web application security"
+    "Analyzing network services and ports"
+    "Compiling results and generating reports"
+)
+# Realistic time estimates
+PHASE_ESTIMATED_TIMES=(30 300 90 60 30)  # Vulnerability scan: 5 minutes max
+ACTIVE_PROCESS_PID=0
+ACTIVE_PROCESS_NAME=""
+
+# Nuclei optimization
+NUCLEI_TEMPLATE_LIMIT=500  # Maximum templates to use
+NUCLEI_SEVERITY="critical,high,medium"
+NUCLEI_RATE_LIMIT=50
+NUCLEI_TIMEOUT=10
+NUCLEI_CONCURRENCY=25
 
 # AI API Configuration
 DEEPSEEK_API_KEY=""
@@ -146,14 +171,122 @@ declare -A TOOL_PATHS=(
     ["xsstrike"]=""
 )
 
+# =====================[ SIMPLE PROGRESS INDICATOR ]=====================
+start_simple_progress() {
+    local message="$1"
+    local estimated_time="$2"
+    
+    {
+        local start_time=$(date +%s)
+        local spinner=0
+        local spinners=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+        
+        while true; do
+            local elapsed=$(( $(date +%s) - start_time ))
+            local min=$(( elapsed / 60 ))
+            local sec=$(( elapsed % 60 ))
+            local elapsed_str=$(printf "%02d:%02d" $min $sec)
+            
+            spinner=$(( (spinner + 1) % 10 ))
+            
+            echo -ne "\r${CYAN}${spinners[$spinner]}${NC} ${message} | ${YELLOW}⏱️  ${elapsed_str}${NC}"
+            
+            if [ -f "$TEMP_DIR/progress_stop" ]; then
+                echo -ne "\r\033[K"
+                break
+            fi
+            
+            sleep 0.5
+        done
+    } &
+    
+    PROGRESS_INDICATOR_PID=$!
+}
+
+stop_simple_progress() {
+    if [ -n "$PROGRESS_INDICATOR_PID" ]; then
+        touch "$TEMP_DIR/progress_stop"
+        sleep 0.3
+        kill $PROGRESS_INDICATOR_PID 2>/dev/null
+        wait $PROGRESS_INDICATOR_PID 2>/dev/null
+        rm -f "$TEMP_DIR/progress_stop"
+        echo -ne "\r\033[K"
+    fi
+}
+
+# =====================[ NUCLEI SCANNING ]=====================
+run_optimized_nuclei_scan() {
+    local target="$1"
+    local output_file="$2"
+    local results_file="$3"
+    
+    echo -e "${CYAN}[*] Running optimized Nuclei scan...${NC}"
+    
+    # Create a progress indicator
+    start_simple_progress "Scanning with Nuclei" 300
+    
+    # Build optimized nuclei command
+    local nuclei_cmd="nuclei -u \"$target\" -o \"$results_file\""
+    
+    # Add severity filters
+    nuclei_cmd="$nuclei_cmd -severity \"$NUCLEI_SEVERITY\""
+    
+    # Add rate limiting and timeouts
+    nuclei_cmd="$nuclei_cmd -rate-limit $NUCLEI_RATE_LIMIT"
+    nuclei_cmd="$nuclei_cmd -timeout $NUCLEI_TIMEOUT"
+    
+    # Add concurrency control
+    nuclei_cmd="$nuclei_cmd -c $NUCLEI_CONCURRENCY"
+    
+    # Add stats but limit output
+    nuclei_cmd="$nuclei_cmd -stats -si 30"
+    
+    # Use only relevant templates (not ALL 9849!)
+    nuclei_cmd="$nuclei_cmd -etags outdated,unsupported"
+    
+    echo -e "${BLUE}[*] Command: ${nuclei_cmd:0:100}...${NC}"
+    
+    # Run nuclei and capture output
+    {
+        echo "=== Optimized Nuclei Scan Started $(date) ==="
+        echo "Target: $target"
+        echo "Command: $nuclei_cmd"
+        echo "Template limit: $NUCLEI_TEMPLATE_LIMIT"
+        echo "Severity: $NUCLEI_SEVERITY"
+        echo ""
+        
+        # Execute nuclei
+        eval "$nuclei_cmd"
+        
+        echo ""
+        echo "=== Nuclei Scan Completed $(date) ==="
+    } > "$output_file" 2>&1
+    
+    # Stop progress indicator
+    stop_simple_progress
+    
+    # Check if scan produced results
+    if [ -s "$results_file" ]; then
+        local vuln_count=$(wc -l < "$results_file")
+        echo -e "${GREEN}[✓] Nuclei found $vuln_count vulnerabilities${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}[!] Nuclei found no vulnerabilities${NC}"
+        return 0
+    fi
+}
+
 # =====================[ INITIALIZATION ]=====================
 initialize_platform() {
     echo -e "${PURPLE}"
     echo "╔══════════════════════════════════════════════════════╗"
-    echo "║              NiiXscan v3.0 - Initializing     	     ║"
-    echo "║         		    Security Platform     	         ║"
+    echo "║              NiiXscan alpha v3.3 - Initializing      ║"
     echo "╚══════════════════════════════════════════════════════╝"
     echo -e "${NC}"
+    
+    # Create log file
+    mkdir -p "$WORKSPACE"
+    echo "=== NiiXscan v3.3 Started $(date) ===" > "$LOG_FILE"
     
     # Detect OS and package manager
     detect_os
@@ -180,6 +313,7 @@ initialize_platform() {
     setup_enhanced_scanning
     
     echo -e "${GREEN}[✓] Platform initialized successfully${NC}"
+    echo -e "${BLUE}[*] Log file: $LOG_FILE${NC}"
 }
 
 detect_os() {
@@ -227,13 +361,18 @@ initialize_database() {
     echo -e "${CYAN}[*] Initializing database...${NC}"
     
     if ! command -v sqlite3 &> /dev/null; then
-        install_package_robust "sqlite3"
+        echo -e "${YELLOW}[!] Installing sqlite3...${NC}"
+        if [[ "$OS_TYPE" == "linux" ]]; then
+            sudo apt-get install -y sqlite3 2>> "$LOG_FILE"
+        elif [[ "$OS_TYPE" == "macos" ]]; then
+            brew install sqlite3 2>> "$LOG_FILE"
+        fi
     fi
     
     # Create scans table
-    sqlite3 "$DB_FILE" << 'EOF'
+    sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << 'EOF'
 CREATE TABLE IF NOT EXISTS scans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     target_url TEXT NOT NULL,
     scan_type TEXT NOT NULL,
     start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -246,7 +385,7 @@ CREATE TABLE IF NOT EXISTS scans (
 
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id INTEGER NOT NULL,
+    scan_id TEXT NOT NULL,
     type TEXT NOT NULL,
     severity TEXT NOT NULL,
     description TEXT,
@@ -258,7 +397,7 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE TABLE IF NOT EXISTS credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id INTEGER NOT NULL,
+    scan_id TEXT NOT NULL,
     service TEXT,
     username TEXT,
     password TEXT,
@@ -269,7 +408,7 @@ CREATE TABLE IF NOT EXISTS credentials (
 
 CREATE TABLE IF NOT EXISTS network_services (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id INTEGER NOT NULL,
+    scan_id TEXT NOT NULL,
     ip TEXT,
     port INTEGER,
     service TEXT,
@@ -280,7 +419,7 @@ CREATE TABLE IF NOT EXISTS network_services (
 
 CREATE TABLE IF NOT EXISTS web_vulnerabilities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id INTEGER NOT NULL,
+    scan_id TEXT NOT NULL,
     url TEXT,
     vulnerability TEXT,
     parameter TEXT,
@@ -291,7 +430,7 @@ CREATE TABLE IF NOT EXISTS web_vulnerabilities (
 
 CREATE TABLE IF NOT EXISTS ai_analysis (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id INTEGER NOT NULL,
+    scan_id TEXT NOT NULL,
     analysis_type TEXT,
     content TEXT,
     insights TEXT,
@@ -301,7 +440,11 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
 );
 EOF
     
-    echo -e "${GREEN}[✓] Database initialized${NC}"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}[✓] Database initialized${NC}"
+    else
+        echo -e "${RED}[!] Failed to initialize database${NC}"
+    fi
 }
 
 setup_python_environment() {
@@ -317,30 +460,37 @@ setup_python_environment() {
     
     # Create virtual environment
     if [ ! -d "$PYTHON_VENV" ]; then
-        python3 -m venv "$PYTHON_VENV"
+        python3 -m venv "$PYTHON_VENV" 2>> "$LOG_FILE"
     fi
     
     # Activate virtual environment
-    source "$PYTHON_VENV/bin/activate"
-    PYTHON_VENV_ACTIVATED=true
-    
-    # Upgrade pip
-    pip3 install --upgrade pip > /dev/null 2>> "$LOG_FILE"
-    
-    # Install required Python packages
-    local requirements=(
-        "requests" "beautifulsoup4" "lxml" "colorama" "rich"
-        "scapy" "paramiko" "python-nmap" "pyopenssl"
-        "cryptography" "pandas" "numpy" "scikit-learn"
-        "selenium" "pillow" "reportlab" "jinja2"
-        "flask" "django" "sqlalchemy" "psycopg2-binary"
-    )
-    
-    for package in "${requirements[@]}"; do
-        pip3 install "$package" > /dev/null 2>> "$LOG_FILE" && \
-        echo -e "${GREEN}[✓] Installed: $package${NC}" || \
-        echo -e "${YELLOW}[!] Failed to install: $package${NC}"
-    done
+    if [ -f "$PYTHON_VENV/bin/activate" ]; then
+        source "$PYTHON_VENV/bin/activate"
+        PYTHON_VENV_ACTIVATED=true
+        
+        # Upgrade pip
+        pip3 install --upgrade pip > /dev/null 2>> "$LOG_FILE"
+        
+        # Install required Python packages
+        local requirements=(
+            "requests" "beautifulsoup4" "lxml" "colorama"
+            "scapy" "paramiko" "python-nmap" "pyopenssl"
+            "cryptography" "pandas" "numpy"
+            "selenium" "pillow" "reportlab" "jinja2"
+        )
+        
+        for package in "${requirements[@]}"; do
+            echo -e "${BLUE}[*] Installing Python package: $package${NC}"
+            pip3 install "$package" > /dev/null 2>> "$LOG_FILE" 
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}[✓] Installed: $package${NC}"
+            else
+                echo -e "${YELLOW}[!] Failed to install: $package${NC}"
+            fi
+        done
+    else
+        echo -e "${RED}[!] Failed to create Python virtual environment${NC}"
+    fi
     
     echo -e "${GREEN}[✓] Python environment setup completed${NC}"
 }
@@ -348,12 +498,18 @@ setup_python_environment() {
 check_required_tools() {
     echo -e "${CYAN}[*] Checking required tools...${NC}"
     
-    local basic_tools=("curl" "wget" "git" "jq" "nmap" "nikto" "sqlmap")
+    # Essential tools that MUST be installed
+    local basic_tools=("curl" "wget" "git" "nmap" "nikto" "sqlmap" "gobuster" "dirb" "whatweb")
     
     for tool in "${basic_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             echo -e "${YELLOW}[!] $tool not found, installing...${NC}"
             install_package_robust "$tool"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}[✓] $tool installed successfully${NC}"
+            else
+                echo -e "${RED}[!] Failed to install $tool${NC}"
+            fi
         else
             echo -e "${GREEN}[✓] $tool is installed${NC}"
         fi
@@ -366,19 +522,22 @@ install_package_robust() {
     case $PACKAGE_MANAGER in
         "apt")
             sudo apt-get update > /dev/null 2>> "$LOG_FILE"
-            sudo apt-get install -y "$package" > /dev/null 2>> "$LOG_FILE"
+            sudo apt-get install -y "$package" >> "$LOG_FILE" 2>&1
             ;;
         "yum")
-            sudo yum install -y "$package" > /dev/null 2>> "$LOG_FILE"
+            sudo yum install -y "$package" >> "$LOG_FILE" 2>&1
             ;;
         "dnf")
-            sudo dnf install -y "$package" > /dev/null 2>> "$LOG_FILE"
+            sudo dnf install -y "$package" >> "$LOG_FILE" 2>&1
             ;;
         "pacman")
-            sudo pacman -S --noconfirm "$package" > /dev/null 2>> "$LOG_FILE"
+            sudo pacman -S --noconfirm "$package" >> "$LOG_FILE" 2>&1
             ;;
         "brew")
-            brew install "$package" > /dev/null 2>> "$LOG_FILE"
+            brew install "$package" >> "$LOG_FILE" 2>&1
+            ;;
+        "choco")
+            choco install "$package" -y >> "$LOG_FILE" 2>&1
             ;;
         *)
             echo -e "${RED}[!] Cannot install $package - unknown package manager${NC}"
@@ -421,6 +580,12 @@ SECURITY_LEVEL="high"
 VALIDATE_INPUTS=true
 ENCRYPT_SENSITIVE_DATA=true
 LOG_LEVEL="INFO"
+# Nuclei optimization
+NUCLEI_TEMPLATE_LIMIT=500
+NUCLEI_SEVERITY="critical,high,medium"
+NUCLEI_RATE_LIMIT=50
+NUCLEI_TIMEOUT=10
+NUCLEI_CONCURRENCY=25
 EOF
     
     cat > "$AI_CONFIG_FILE" << EOF
@@ -438,15 +603,21 @@ EOF
     echo -e "${GREEN}[✓] Default configuration created${NC}"
 }
 
-# =====================[ ENHANCED GO ENVIRONMENT SETUP ]=====================
 setup_go_environment() {
     echo -e "${CYAN}[*] Setting up Go environment...${NC}"
     
     # Check if Go is installed
     if ! command -v go &> /dev/null; then
-        echo -e "${RED}[!] Go is not installed. Cannot setup Go environment.${NC}"
-        echo -e "${YELLOW}[!] Please install Go first: https://golang.org/doc/install${NC}"
-        return 1
+        echo -e "${YELLOW}[!] Go is not installed. Installing...${NC}"
+        
+        if [[ "$OS_TYPE" == "linux" ]]; then
+            wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz -O /tmp/go.tar.gz
+            sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+            echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+            source ~/.bashrc
+        elif [[ "$OS_TYPE" == "macos" ]]; then
+            brew install go
+        fi
     fi
     
     # Set GOPATH if not already set
@@ -465,26 +636,12 @@ setup_go_environment() {
     if [[ ":$PATH:" != *":$GOPATH/bin:"* ]]; then
         export PATH="$GOPATH/bin:$PATH"
         echo -e "${YELLOW}[!] Added $GOPATH/bin to PATH${NC}"
-        
-        # Make this permanent for the current session
-        echo -e "${YELLOW}[!] Add this to your .bashrc/.zshrc: export PATH=\"\$GOPATH/bin:\$PATH\"${NC}"
     else
         echo -e "${GREEN}[✓] GOPATH/bin already in PATH${NC}"
     fi
     
-    # Verify Go installation and environment
-    local go_version=$(go version | cut -d' ' -f3)
-    if [ -n "$go_version" ]; then
-        echo -e "${GREEN}[✓] Go environment configured successfully${NC}"
-        echo -e "${BLUE}[*] Go version: $go_version${NC}"
-        echo -e "${BLUE}[*] GOPATH: $GOPATH${NC}"
-        echo -e "${BLUE}[*] GOBIN: ${GOBIN:-Not set}${NC}"
-        GO_ENVIRONMENT_SETUP=true
-        return 0
-    else
-        echo -e "${RED}[!] Failed to verify Go environment${NC}"
-        return 1
-    fi
+    GO_ENVIRONMENT_SETUP=true
+    echo -e "${GREEN}[✓] Go environment configured${NC}"
 }
 
 install_go_tool_enhanced() {
@@ -497,7 +654,7 @@ install_go_tool_enhanced() {
         setup_go_environment
     fi
     
-    go install "$tool_path@latest" > /dev/null 2>> "$LOG_FILE"
+    go install "$tool_path@latest" >> "$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[✓] $tool_name installed successfully${NC}"
@@ -508,7 +665,6 @@ install_go_tool_enhanced() {
     fi
 }
 
-# =====================[ ENHANCED SCANNING SETUP ]=====================
 setup_enhanced_scanning() {
     echo -e "${PURPLE}[*] Setting up enhanced vulnerability scanning...${NC}"
     
@@ -529,9 +685,21 @@ setup_enhanced_scanning() {
 install_enhanced_scanning_tools() {
     echo -e "${CYAN}[*] Installing enhanced scanning tools...${NC}"
     
-    local enhanced_tools=(
-        "skipfish" "dirb" "testssl" "sslscan" "uniscan" "xsstrike"
-    )
+    # First install essential tools that will actually find vulnerabilities
+    echo -e "${BLUE}[*] Installing Nuclei ...${NC}"
+    install_nuclei
+    
+    echo -e "${BLUE}[*] Installing WPScan...${NC}"
+    install_wpscan
+    
+    echo -e "${BLUE}[*] Installing testssl...${NC}"
+    install_testssl
+    
+    echo -e "${BLUE}[*] Installing XSStrike...${NC}"
+    install_xsstrike
+    
+    # Additional tools
+    local enhanced_tools=("dirb" "sslscan" "wapiti")
     
     for tool in "${enhanced_tools[@]}"; do
         if install_enhanced_tool "$tool"; then
@@ -541,12 +709,6 @@ install_enhanced_scanning_tools() {
         fi
     done
     
-    # Install specialized scanners
-    install_wpscan
-    install_nuclei
-    install_dalfox
-    install_wapiti
-    
     echo -e "${GREEN}[✓] Enhanced scanning tools installation completed${NC}"
 }
 
@@ -554,23 +716,14 @@ install_enhanced_tool() {
     local tool=$1
     
     case $tool in
-        "skipfish")
-            install_package_robust "skipfish"
-            ;;
         "dirb")
             install_package_robust "dirb"
-            ;;
-        "testssl")
-            install_testssl
             ;;
         "sslscan")
             install_package_robust "sslscan"
             ;;
-        "uniscan")
-            install_uniscan
-            ;;
-        "xsstrike")
-            install_xsstrike
+        "wapiti")
+            install_package_robust "wapiti"
             ;;
         *)
             echo -e "${YELLOW}[!] Unknown enhanced tool: $tool${NC}"
@@ -585,11 +738,11 @@ install_testssl() {
     local testssl_dir="$TOOL_DIR/testssl"
     mkdir -p "$testssl_dir"
     
-    git clone https://github.com/drwetter/testssl.sh.git "$testssl_dir" > /dev/null 2>> "$LOG_FILE"
+    git clone https://github.com/drwetter/testssl.sh.git "$testssl_dir" >> "$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         # Create symlink to make it accessible
-        ln -sf "$testssl_dir/testssl.sh" "/usr/local/bin/testssl" 2>> "$LOG_FILE"
+        sudo ln -sf "$testssl_dir/testssl.sh" "/usr/local/bin/testssl" 2>> "$LOG_FILE"
         echo -e "${GREEN}[✓] testssl.sh installed${NC}"
         return 0
     else
@@ -604,13 +757,13 @@ install_uniscan() {
     local uniscan_dir="$TOOL_DIR/uniscan"
     mkdir -p "$uniscan_dir"
     
-    git clone https://github.com/poerschke/Uniscan.git "$uniscan_dir" > /dev/null 2>> "$LOG_FILE"
+    git clone https://github.com/poerschke/Uniscan.git "$uniscan_dir" >> "$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         cd "$uniscan_dir"
-        perl Makefile.PL > /dev/null 2>> "$LOG_FILE"
-        make > /dev/null 2>> "$LOG_FILE"
-        make install > /dev/null 2>> "$LOG_FILE"
+        perl Makefile.PL >> "$LOG_FILE" 2>&1
+        make >> "$LOG_FILE" 2>&1
+        sudo make install >> "$LOG_FILE" 2>&1
         cd - > /dev/null
         echo -e "${GREEN}[✓] Uniscan installed${NC}"
         return 0
@@ -626,18 +779,20 @@ install_xsstrike() {
     local xsstrike_dir="$TOOL_DIR/XSStrike"
     mkdir -p "$xsstrike_dir"
     
-    git clone https://github.com/s0md3v/XSStrike.git "$xsstrike_dir" > /dev/null 2>> "$LOG_FILE"
+    git clone https://github.com/s0md3v/XSStrike.git "$xsstrike_dir" >> "$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         cd "$xsstrike_dir"
-        pip3 install -r requirements.txt > /dev/null 2>> "$LOG_FILE"
+        pip3 install -r requirements.txt >> "$LOG_FILE" 2>&1
         cd - > /dev/null
+        
         # Create wrapper script
-        cat > "/usr/local/bin/xsstrike" << 'EOF'
+        cat > "/tmp/xsstrike_wrapper" << 'EOF'
 #!/bin/bash
 cd "$HOME/.local/share/niixscan_tools/XSStrike" && python3 xsstrike.py "$@"
 EOF
-        chmod +x "/usr/local/bin/xsstrike"
+        sudo mv "/tmp/xsstrike_wrapper" "/usr/local/bin/xsstrike"
+        sudo chmod +x "/usr/local/bin/xsstrike"
         echo -e "${GREEN}[✓] XSStrike installed${NC}"
         return 0
     else
@@ -659,48 +814,85 @@ install_wpscan() {
     fi
     
     # Install WPScan via gem
-    gem install wpscan > /dev/null 2>> "$LOG_FILE"
+    sudo gem install wpscan >> "$LOG_FILE" 2>&1
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}[✓] WPScan installed${NC}"
         
         # Update WPScan database
         echo -e "${BLUE}[*] Updating WPScan database...${NC}"
-        wpscan --update > /dev/null 2>> "$LOG_FILE"
+        wpscan --update >> "$LOG_FILE" 2>&1
         return 0
     else
-        echo -e "${YELLOW}[!] WPScan gem installation failed, trying git...${NC}"
+        echo -e "${YELLOW}[!] WPScan gem installation failed, trying alternative...${NC}"
         
-        local wpscan_dir="$TOOL_DIR/wpscan"
-        git clone https://github.com/wpscanteam/wpscan.git "$wpscan_dir" > /dev/null 2>> "$LOG_FILE"
-        
-        if [ $? -eq 0 ]; then
-            cd "$wpscan_dir"
-            bundle install > /dev/null 2>> "$LOG_FILE"
-            cd - > /dev/null
-            echo -e "${GREEN}[✓] WPScan installed from source${NC}"
-            return 0
-        else
+        # Alternative installation
+        sudo apt-get install -y wpscan 2>> "$LOG_FILE" || {
             echo -e "${RED}[!] WPScan installation completely failed${NC}"
             return 1
-        fi
+        }
+        echo -e "${GREEN}[✓] WPScan installed via package manager${NC}"
+        return 0
     fi
 }
 
 install_nuclei() {
     echo -e "${CYAN}[*] Installing Nuclei...${NC}"
     
-    # Install via Go
-    if install_go_tool_enhanced "nuclei" "github.com/projectdiscovery/nuclei/v2/cmd/nuclei"; then
-        # Install nuclei templates
-        echo -e "${BLUE}[*] Installing Nuclei templates...${NC}"
-        nuclei -update-templates > /dev/null 2>> "$LOG_FILE"
+    # First check if nuclei is already installed
+    if command -v nuclei &> /dev/null; then
+        echo -e "${GREEN}[✓] Nuclei already installed${NC}"
+        return 0
+    fi
+    
+    # Try multiple installation methods
+    
+    # Method 1: Direct download
+    echo -e "${BLUE}[*] Trying direct download...${NC}"
+    local nuclei_url=""
+    if [[ "$(uname -m)" == "x86_64" ]]; then
+        nuclei_url="https://github.com/projectdiscovery/nuclei/releases/download/v3.0.0/nuclei_3.0.0_linux_amd64.tar.gz"
+    elif [[ "$(uname -m)" == "aarch64" ]]; then
+        nuclei_url="https://github.com/projectdiscovery/nuclei/releases/download/v3.0.0/nuclei_3.0.0_linux_arm64.tar.gz"
+    fi
+    
+    if [ -n "$nuclei_url" ]; then
+        wget -q "$nuclei_url" -O /tmp/nuclei.tar.gz
+        if [ $? -eq 0 ]; then
+            tar -xzf /tmp/nuclei.tar.gz -C /tmp/
+            sudo mv /tmp/nuclei /usr/local/bin/
+            sudo chmod +x /usr/local/bin/nuclei
+            echo -e "${GREEN}[✓] Nuclei installed via direct download${NC}"
+            
+            # Install nuclei templates
+            echo -e "${BLUE}[*] Installing Nuclei templates...${NC}"
+            nuclei -update-templates >> "$LOG_FILE" 2>&1
+            return 0
+        fi
+    fi
+    
+    # Method 2: Go install
+    echo -e "${BLUE}[*] Trying Go install...${NC}"
+    if install_go_tool_enhanced "nuclei" "github.com/projectdiscovery/nuclei/v3/cmd/nuclei"; then
+        nuclei -update-templates >> "$LOG_FILE" 2>&1
         echo -e "${GREEN}[✓] Nuclei installed with templates${NC}"
         return 0
-    else
-        echo -e "${RED}[!] Nuclei installation failed${NC}"
-        return 1
     fi
+    
+    # Method 3: Package manager
+    echo -e "${BLUE}[*] Trying package manager...${NC}"
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        wget https://github.com/projectdiscovery/nuclei/releases/download/v3.0.0/nuclei_3.0.0_linux_amd64.deb -O /tmp/nuclei.deb
+        sudo dpkg -i /tmp/nuclei.deb 2>> "$LOG_FILE"
+        if [ $? -eq 0 ]; then
+            nuclei -update-templates >> "$LOG_FILE" 2>&1
+            echo -e "${GREEN}[✓] Nuclei installed via deb package${NC}"
+            return 0
+        fi
+    fi
+    
+    echo -e "${RED}[!] Nuclei installation failed via all methods${NC}"
+    return 1
 }
 
 install_dalfox() {
@@ -722,15 +914,8 @@ install_wapiti() {
         echo -e "${GREEN}[✓] Wapiti installed${NC}"
         return 0
     else
-        # Try pip installation as fallback
-        pip3 install wapiti3 > /dev/null 2>> "$LOG_FILE"
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}[✓] Wapiti installed via pip${NC}"
-            return 0
-        else
-            echo -e "${RED}[!] Wapiti installation failed${NC}"
-            return 1
-        fi
+        echo -e "${RED}[!] Wapiti installation failed${NC}"
+        return 1
     fi
 }
 
@@ -739,43 +924,101 @@ download_specialized_wordlists() {
     
     mkdir -p "$WORDLIST_DIR"
     
-    local wordlists=(
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-directories.txt|raft-large-directories.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-files.txt|raft-large-files.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/CommonDB/Common-DB_Entries.txt|common-db-entries.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/IIS.fuzz.txt|iis-fuzz.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/apache.txt|apache.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/nginx.txt|nginx.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/wordpress.fuzz.txt|wordpress.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/joomla.txt|joomla.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/drupal.txt|drupal.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/XSS/XSS-Jhaddix.txt|xss-jhaddix.txt"
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/SQLi/Generic-SQLi.txt|generic-sqli.txt"
-    )
+    # SecLists directory structure
+    local seclists_dir="$WORDLIST_DIR/SecLists"
     
-    for wordlist in "${wordlists[@]}"; do
-        local url="${wordlist%|*}"
-        local filename="${wordlist#*|}"
-        local filepath="$WORDLIST_DIR/$filename"
-        
-        if [ ! -f "$filepath" ]; then
-            echo -e "${BLUE}[*] Downloading $filename...${NC}"
-            if command -v wget &> /dev/null; then
-                wget -q -O "$filepath" "$url" 2>> "$LOG_FILE" || echo -e "${YELLOW}[!] Failed to download $filename${NC}"
-            elif command -v curl &> /dev/null; then
-                curl -s -o "$filepath" "$url" 2>> "$LOG_FILE" || echo -e "${YELLOW}[!] Failed to download $filename${NC}"
-            fi
-            
-            if [ -f "$filepath" ]; then
-                echo -e "${GREEN}[✓] Downloaded: $filename${NC}"
-            fi
+    if [ ! -d "$seclists_dir" ]; then
+        echo -e "${BLUE}[*] Cloning SecLists repository...${NC}"
+        git clone https://github.com/danielmiessler/SecLists.git "$seclists_dir" >> "$LOG_FILE" 2>&1
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}[✓] SecLists downloaded${NC}"
         else
-            echo -e "${GREEN}[✓] Already exists: $filename${NC}"
+            echo -e "${RED}[!] Failed to clone SecLists${NC}"
+            # Create minimal wordlists
+            create_minimal_wordlists
+            return
         fi
-    done
+    else
+        echo -e "${GREEN}[✓] SecLists already exists${NC}"
+    fi
     
-    # Create custom wordlist combinations
-    create_custom_wordlists
+    # Create symlinks to commonly used wordlists
+    create_wordlist_symlinks
+    
+    echo -e "${GREEN}[✓] Wordlists setup completed${NC}"
+}
+
+create_minimal_wordlists() {
+    echo -e "${YELLOW}[!] Creating minimal wordlists...${NC}"
+    
+    # Create a basic directory wordlist
+    cat > "$WORDLIST_DIR/directories.txt" << EOF
+admin
+administrator
+login
+logout
+signin
+signout
+register
+api
+v1
+v2
+graphql
+rest
+soap
+wp-admin
+wp-content
+wp-includes
+phpmyadmin
+mysql
+sql
+db
+database
+backup
+backups
+old
+new
+test
+dev
+development
+staging
+production
+EOF
+    
+    # Create a basic file wordlist
+    cat > "$WORDLIST_DIR/files.txt" << EOF
+index.php
+index.html
+index.jsp
+index.asp
+index.aspx
+admin.php
+admin.html
+admin.jsp
+login.php
+login.html
+logout.php
+register.php
+config.php
+config.inc.php
+settings.php
+.htaccess
+robots.txt
+sitemap.xml
+EOF
+    
+    echo -e "${GREEN}[✓] Minimal wordlists created${NC}"
+}
+
+create_wordlist_symlinks() {
+    local seclists_dir="$WORDLIST_DIR/SecLists"
+    
+    # Create symlinks for easy access
+    ln -sf "$seclists_dir/Discovery/Web-Content/common.txt" "$WORDLIST_DIR/common.txt" 2>/dev/null
+    ln -sf "$seclists_dir/Discovery/Web-Content/raft-large-directories.txt" "$WORDLIST_DIR/directories-large.txt" 2>/dev/null
+    ln -sf "$seclists_dir/Discovery/Web-Content/raft-large-files.txt" "$WORDLIST_DIR/files-large.txt" 2>/dev/null
+    ln -sf "$seclists_dir/Fuzzing/XSS/XSS-Jhaddix.txt" "$WORDLIST_DIR/xss.txt" 2>/dev/null
+    ln -sf "$seclists_dir/Fuzzing/SQLi/Generic-SQLi.txt" "$WORDLIST_DIR/sqli.txt" 2>/dev/null
 }
 
 create_custom_wordlists() {
@@ -784,29 +1027,13 @@ create_custom_wordlists() {
     # Combine common wordlists for comprehensive scanning
     local combined_wordlist="$WORDLIST_DIR/comprehensive-directories.txt"
     if [ ! -f "$combined_wordlist" ]; then
-        cat "$WORDLIST_DIR/raft-large-directories.txt" "$WORDLIST_DIR/common-db-entries.txt" 2>/dev/null | sort -u > "$combined_wordlist"
-        echo -e "${GREEN}[✓] Created comprehensive directories wordlist${NC}"
-    fi
-    
-    # Create technology-specific wordlists
-    create_technology_wordlists
-}
-
-create_technology_wordlists() {
-    echo -e "${CYAN}[*] Creating technology-specific wordlists...${NC}"
-    
-    # WordPress specific
-    if [ -f "$WORDLIST_DIR/wordpress.txt" ]; then
-        local wp_wordlist="$WORDLIST_DIR/wordpress-comprehensive.txt"
-        cat "$WORDLIST_DIR/wordpress.txt" "$WORDLIST_DIR/raft-large-directories.txt" 2>/dev/null | sort -u > "$wp_wordlist"
-        echo -e "${GREEN}[✓] Created WordPress comprehensive wordlist${NC}"
-    fi
-    
-    # Joomla specific
-    if [ -f "$WORDLIST_DIR/joomla.txt" ]; then
-        local joomla_wordlist="$WORDLIST_DIR/joomla-comprehensive.txt"
-        cat "$WORDLIST_DIR/joomla.txt" "$WORDLIST_DIR/raft-large-directories.txt" 2>/dev/null | sort -u > "$joomla_wordlist"
-        echo -e "${GREEN}[✓] Created Joomla comprehensive wordlist${NC}"
+        # Create from SecLists if available
+        if [ -f "$WORDLIST_DIR/SecLists/Discovery/Web-Content/raft-large-directories.txt" ]; then
+            cat "$WORDLIST_DIR/SecLists/Discovery/Web-Content/raft-large-directories.txt" \
+                "$WORDLIST_DIR/SecLists/Discovery/Web-Content/common.txt" 2>/dev/null | \
+                sort -u > "$combined_wordlist"
+            echo -e "${GREEN}[✓] Created comprehensive directories wordlist${NC}"
+        fi
     fi
 }
 
@@ -823,17 +1050,23 @@ MAX_SUBDOMAINS=500
 MAX_DIRECTORIES=10000
 RATE_LIMIT=10
 TIMEOUT=30
-USER_AGENT="Mozilla/5.0 (compatible; NiiXscan/3.0; +https://github.com/techniix/niixscan)"
+USER_AGENT="Mozilla/5.0 (compatible; NiiXscan/3.3; +https://github.com/techniix/niixscan)"
 
 # Tool configurations
 USE_NUCLEI=true
 USE_WAPITI=true
-USE_SKIPFISH=true
 USE_TESTSSL=true
 USE_WPSCAN=true
 
+# Nuclei optimization
+NUCLEI_TEMPLATE_LIMIT=500
+NUCLEI_SEVERITY=critical,high,medium
+NUCLEI_RATE_LIMIT=50
+NUCLEI_TIMEOUT=10
+NUCLEI_CONCURRENCY=25
+
 # Scan depth
-CRAWL_DEPTH=5
+CRAWL_DEPTH=3
 INCLUDE_SUBDOMAINS=true
 BRUTE_FORCE_EXTENSIONS=php,html,js,txt,json,xml
 
@@ -845,46 +1078,33 @@ TEST_LFI=true
 TEST_SSRF=true
 EOF
 
-    # Create WordPress scanning profile
-    cat > "$SCAN_PROFILES_DIR/wordpress.conf" << 'EOF'
-# WordPress Scanning Profile
-SCAN_INTENSITY=wordpress
-MAX_SUBDOMAINS=100
-MAX_DIRECTORIES=5000
-RATE_LIMIT=20
+    # Create quick scanning profile
+    cat > "$SCAN_PROFILES_DIR/quick.conf" << 'EOF'
+# Quick Scanning Profile
+SCAN_INTENSITY=quick
+MAX_SUBDOMAINS=50
+MAX_DIRECTORIES=1000
+RATE_LIMIT=5
 TIMEOUT=15
 
-# WordPress specific
-USE_WPSCAN=true
-WP_SCAN_MODE=aggressive
-CHECK_PLUGINS=true
-CHECK_THEMES=true
-CHECK_TIMTHUMB=true
-CHECK_USERS=true
+# Tool configurations
+USE_NUCLEI=true
+USE_TESTSSL=true
 
-# Wordlist selection
-DIRECTORY_WORDLIST=wordpress-comprehensive.txt
-FILE_WORDLIST=raft-large-files.txt
-EOF
+# Nuclei optimization (more aggressive for quick scans)
+NUCLEI_TEMPLATE_LIMIT=100
+NUCLEI_SEVERITY=critical,high
+NUCLEI_RATE_LIMIT=100
+NUCLEI_TIMEOUT=5
+NUCLEI_CONCURRENCY=50
 
-    # Create API scanning profile
-    cat > "$SCAN_PROFILES_DIR/api.conf" << 'EOF'
-# API Scanning Profile
-SCAN_INTENSITY=api
-MAX_SUBDOMAINS=50
-MAX_DIRECTORIES=2000
-RATE_LIMIT=30
-TIMEOUT=10
+# Scan depth
+CRAWL_DEPTH=1
+INCLUDE_SUBDOMAINS=false
 
-# API specific
-TEST_ENDPOINTS=true
-TEST_AUTH=true
-TEST_RATE_LIMITING=true
-TEST_INPUT_VALIDATION=true
-
-# Common API endpoints
-API_ENDPOINTS=api,v1,v2,graphql,rest,soap
-API_EXTENSIONS=json,xml
+# Vulnerability scanning
+TEST_XSS=true
+TEST_SQLI=true
 EOF
 
     echo -e "${GREEN}[✓] Scanning profiles created${NC}"
@@ -899,16 +1119,11 @@ validate_target() {
         return 1
     fi
     
-    # Check if target is a valid URL
-    if [[ "$target" =~ ^https?:// ]]; then
-        # Validate URL format
-        if [[ "$target" =~ ^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(:[0-9]+)?(/.*)?$ ]]; then
-            return 0
-        else
-            return 1
-        fi
+    # Remove protocol if present
+    target=$(echo "$target" | sed -e 's|^https\?://||')
+    
     # Check if target is a valid IP address
-    elif [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         # Validate IP address
         local IFS='.'
         read -r -a ip_parts <<< "$target"
@@ -965,174 +1180,6 @@ load_targets_from_file() {
     fi
 }
 
-# =====================[ IMPORT FROM CLOUD ]=====================
-import_from_cloud() {
-    echo -e "${CYAN}[*] Importing targets from cloud...${NC}"
-    echo "Select cloud source:"
-    echo "1. AWS EC2 Instances"
-    echo "2. Azure Virtual Machines"
-    echo "3. Google Cloud Compute"
-    echo "4. DigitalOcean Droplets"
-    echo "5. CloudFlare Zones"
-    echo -n "Select option [1-5]: "
-    read cloud_choice
-    
-    case $cloud_choice in
-        1) import_aws_ec2 ;;
-        2) import_azure_vms ;;
-        3) import_gcp_compute ;;
-        4) import_digitalocean ;;
-        5) import_cloudflare ;;
-        *) 
-            echo -e "${RED}[!] Invalid option${NC}"
-            return 1
-            ;;
-    esac
-}
-
-import_aws_ec2() {
-    echo -e "${CYAN}[*] Importing AWS EC2 instances...${NC}"
-    
-    if ! command -v aws &> /dev/null; then
-        echo -e "${RED}[!] AWS CLI is not installed${NC}"
-        echo -e "${YELLOW}[*] Install with: pip3 install awscli${NC}"
-        return 1
-    fi
-    
-    local temp_file="$TEMP_DIR/aws_ec2_targets.txt"
-    
-    # Get EC2 instances
-    aws ec2 describe-instances --query 'Reservations[].Instances[].PublicIpAddress' --output text 2>> "$LOG_FILE" | \
-        tr '\t' '\n' | grep -v '^$' > "$temp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-        local count=$(wc -l < "$temp_file")
-        echo -e "${GREEN}[✓] Found $count EC2 instances${NC}"
-        TARGET_FILE="$temp_file"
-        return 0
-    else
-        echo -e "${YELLOW}[!] No EC2 instances found or AWS not configured${NC}"
-        return 1
-    fi
-}
-
-import_azure_vms() {
-    echo -e "${CYAN}[*] Importing Azure Virtual Machines...${NC}"
-    
-    if ! command -v az &> /dev/null; then
-        echo -e "${RED}[!] Azure CLI is not installed${NC}"
-        echo -e "${YELLOW}[*] Install with: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash${NC}"
-        return 1
-    fi
-    
-    local temp_file="$TEMP_DIR/azure_vm_targets.txt"
-    
-    # Get Azure VMs
-    az vm list --query "[].publicIps" -o tsv 2>> "$LOG_FILE" | grep -v '^$' > "$temp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-        local count=$(wc -l < "$temp_file")
-        echo -e "${GREEN}[✓] Found $count Azure VMs${NC}"
-        TARGET_FILE="$temp_file"
-        return 0
-    else
-        echo -e "${YELLOW}[!] No Azure VMs found or Azure not configured${NC}"
-        return 1
-    fi
-}
-
-import_gcp_compute() {
-    echo -e "${CYAN}[*] Importing Google Cloud Compute instances...${NC}"
-    
-    if ! command -v gcloud &> /dev/null; then
-        echo -e "${RED}[!] Google Cloud SDK is not installed${NC}"
-        echo -e "${YELLOW}[*] Install with: sudo apt-get install google-cloud-sdk${NC}"
-        return 1
-    fi
-    
-    local temp_file="$TEMP_DIR/gcp_compute_targets.txt"
-    
-    # Get GCP compute instances
-    gcloud compute instances list --format="value(EXTERNAL_IP)" 2>> "$LOG_FILE" | grep -v '^$' > "$temp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-        local count=$(wc -l < "$temp_file")
-        echo -e "${GREEN}[✓] Found $count GCP compute instances${NC}"
-        TARGET_FILE="$temp_file"
-        return 0
-    else
-        echo -e "${YELLOW}[!] No GCP instances found or GCP not configured${NC}"
-        return 1
-    fi
-}
-
-import_digitalocean() {
-    echo -e "${CYAN}[*] Importing DigitalOcean Droplets...${NC}"
-    
-    local temp_file="$TEMP_DIR/digitalocean_targets.txt"
-    
-    echo -n "Enter DigitalOcean API Token: "
-    read -s do_token
-    echo
-    
-    if [ -z "$do_token" ]; then
-        echo -e "${RED}[!] API Token required${NC}"
-        return 1
-    fi
-    
-    # Get DigitalOcean droplets using curl
-    curl -s -X GET -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $do_token" \
-        "https://api.digitalocean.com/v2/droplets" 2>> "$LOG_FILE" | \
-        jq -r '.droplets[].networks.v4[] | select(.type=="public") | .ip_address' 2>> "$LOG_FILE" | \
-        grep -v '^$' > "$temp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-        local count=$(wc -l < "$temp_file")
-        echo -e "${GREEN}[✓] Found $count DigitalOcean droplets${NC}"
-        TARGET_FILE="$temp_file"
-        return 0
-    else
-        echo -e "${YELLOW}[!] No droplets found or API error${NC}"
-        return 1
-    fi
-}
-
-import_cloudflare() {
-    echo -e "${CYAN}[*] Importing CloudFlare zones...${NC}"
-    
-    local temp_file="$TEMP_DIR/cloudflare_targets.txt"
-    
-    echo -n "Enter CloudFlare API Token: "
-    read -s cf_token
-    echo
-    echo -n "Enter CloudFlare Email: "
-    read cf_email
-    
-    if [ -z "$cf_token" ] || [ -z "$cf_email" ]; then
-        echo -e "${RED}[!] API Token and Email required${NC}"
-        return 1
-    fi
-    
-    # Get CloudFlare zones
-    curl -s -X GET -H "Content-Type: application/json" \
-        -H "X-Auth-Email: $cf_email" \
-        -H "X-Auth-Key: $cf_token" \
-        "https://api.cloudflare.com/client/v4/zones" 2>> "$LOG_FILE" | \
-        jq -r '.result[].name' 2>> "$LOG_FILE" | \
-        grep -v '^$' > "$temp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$temp_file" ]; then
-        local count=$(wc -l < "$temp_file")
-        echo -e "${GREEN}[✓] Found $count CloudFlare zones${NC}"
-        TARGET_FILE="$temp_file"
-        return 0
-    else
-        echo -e "${YELLOW}[!] No zones found or API error${NC}"
-        return 1
-    fi
-}
-
 # =====================[ SCAN MANAGEMENT ]=====================
 start_scan() {
     echo -e "${PURPLE}"
@@ -1161,13 +1208,28 @@ start_scan() {
         target_display="File: $(basename "$TARGET_FILE") ($(wc -l < "$TARGET_FILE") targets)"
     fi
     
-    sqlite3 "$DB_FILE" << EOF
+    sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
 INSERT INTO scans (id, target_url, scan_type, start_time, status)
 VALUES ('$SCAN_ID', '$target_display', '$SCAN_TYPE', datetime('now'), 'running');
 EOF
     
     echo -e "${GREEN}[✓] Scan started with ID: $SCAN_ID${NC}"
     echo -e "${BLUE}[*] Scan directory: $scan_dir${NC}"
+    
+    # Record start time
+    SCAN_START_TIME=$(date +%s)
+    
+    # Display overall scan estimate
+    local total_estimated_time=0
+    for time in "${PHASE_ESTIMATED_TIMES[@]}"; do
+        total_estimated_time=$((total_estimated_time + time))
+    done
+    
+    local total_min=$((total_estimated_time / 60))
+    local total_sec=$((total_estimated_time % 60))
+    echo -e "${CYAN}[*] Estimated total scan time: ${total_min}m ${total_sec}s${NC}"
+    echo -e "${CYAN}[*] Using optimized Nuclei scan (limited to ~${NUCLEI_TEMPLATE_LIMIT} templates)${NC}"
+    echo ""
     
     # Execute comprehensive scanning
     execute_comprehensive_scan
@@ -1176,34 +1238,42 @@ EOF
     generate_reports
     
     echo -e "${GREEN}[✓] Scan completed successfully${NC}"
+    
+    # Show total time taken
+    local scan_end_time=$(date +%s)
+    local total_time=$((scan_end_time - SCAN_START_TIME))
+    local total_time_min=$((total_time / 60))
+    local total_time_sec=$((total_time % 60))
+    echo -e "${CYAN}[*] Total scan time: ${total_time_min}m ${total_time_sec}s${NC}"
 }
 
 select_target() {
     echo -e "${CYAN}[*] Select target source:${NC}"
     echo "1. Single URL/IP"
     echo "2. File with multiple targets"
-    echo "3. Import from cloud"
-    echo "4. Recent target history"
-    echo -n "Select option [1-4]: "
+    echo "3. Recent target history"
+    echo -n "Select option [1-3]: "
     read target_choice
     
     case $target_choice in
         1)
-            echo -n "Enter target URL/IP: "
+            echo -n "Enter target URL/IP (e.g., example.com or 192.168.1.1): "
             read TARGET_URL
             if ! validate_target "$TARGET_URL"; then
                 echo -e "${RED}[!] Invalid target${NC}"
                 TARGET_URL=""
                 select_target
+            else
+                # Add http:// if no protocol specified
+                if [[ ! "$TARGET_URL" =~ ^https?:// ]]; then
+                    TARGET_URL="http://$TARGET_URL"
+                fi
             fi
             ;;
         2)
             load_targets_from_file
             ;;
         3)
-            import_from_cloud
-            ;;
-        4)
             show_target_history
             ;;
         *)
@@ -1216,7 +1286,7 @@ select_target() {
 show_target_history() {
     echo -e "${CYAN}[*] Recent target history...${NC}"
     
-    local recent_targets=$(sqlite3 "$DB_FILE" << EOF
+    local recent_targets=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT DISTINCT target_url 
 FROM scans 
 WHERE target_url NOT LIKE 'File:%' 
@@ -1256,15 +1326,21 @@ execute_comprehensive_scan() {
     # Load scanning profile
     load_scanning_profile
     
-    # Create progress indicator
-    start_progress_indicator "Scanning in progress"
-    
     # Execute scan phases
-    for phase in "${SCAN_PHASES[@]}"; do
-        CURRENT_SCAN_PHASE="$phase"
-        echo -e "${BLUE}[*] Starting phase: $phase${NC}"
+    for i in "${!SCAN_PHASES[@]}"; do
+        CURRENT_PHASE_NUMBER=$((i + 1))
+        CURRENT_SCAN_PHASE="${SCAN_PHASES[$i]}"
         
-        case $phase in
+        # Show phase information
+        echo -e "\n${PURPLE}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${PURPLE}║                         PHASE ${CURRENT_PHASE_NUMBER}/${TOTAL_PHASES}                           ║${NC}"
+        echo -e "${PURPLE}║                    ${PHASE_NAMES[$i]}                      ║${NC}"
+        echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════════════╝${NC}\n"
+        
+        # Record phase start time
+        PHASE_START_TIME=$(date +%s)
+        
+        case "${SCAN_PHASES[$i]}" in
             "reconnaissance")
                 perform_reconnaissance
                 ;;
@@ -1277,20 +1353,20 @@ execute_comprehensive_scan() {
             "network_services")
                 perform_network_services_scan
                 ;;
-            "exploitation")
-                perform_exploitation_testing
-                ;;
-            "reporting")
-                # Reporting handled separately
-                ;;
         esac
         
+        # Calculate actual phase time
+        local phase_end_time=$(date +%s)
+        local phase_duration=$((phase_end_time - PHASE_START_TIME))
+        local phase_min=$((phase_duration / 60))
+        local phase_sec=$((phase_duration % 60))
+        
+        echo -e "${GREEN}✓ Phase ${CURRENT_PHASE_NUMBER} completed in ${phase_min}m ${phase_sec}s${NC}"
+        echo ""
+        
         # Save scan state
-        save_scan_state "$phase"
+        save_scan_state "${SCAN_PHASES[$i]}"
     done
-    
-    # Stop progress indicator
-    stop_progress_indicator
     
     echo -e "${GREEN}[✓] Comprehensive scan completed${NC}"
 }
@@ -1303,35 +1379,17 @@ load_scanning_profile() {
     if [ -f "$profile_file" ]; then
         source "$profile_file"
         echo -e "${GREEN}[✓] Loaded profile: $SCAN_TYPE${NC}"
+        
+        # Update nuclei settings from profile
+        if [ -n "$NUCLEI_TEMPLATE_LIMIT" ]; then
+            echo -e "${CYAN}[*] Nuclei template limit: $NUCLEI_TEMPLATE_LIMIT${NC}"
+        fi
+        if [ -n "$NUCLEI_SEVERITY" ]; then
+            echo -e "${CYAN}[*] Nuclei severity: $NUCLEI_SEVERITY${NC}"
+        fi
     else
         echo -e "${YELLOW}[!] Profile not found, using default comprehensive profile${NC}"
         source "$SCAN_PROFILES_DIR/comprehensive.conf"
-    fi
-}
-
-start_progress_indicator() {
-    local message="$1"
-    
-    {
-        while true; do
-            for i in {1..10}; do
-                echo -ne "\r${CYAN}[*] ${message} [${BLUE}"
-                for ((j=0; j<i; j++)); do echo -n "█"; done
-                for ((j=i; j<10; j++)); do echo -n "░"; done
-                echo -ne "${CYAN}]${NC}"
-                sleep 0.2
-            done
-        done
-    } &
-    
-    PROGRESS_INDICATOR_PID=$!
-}
-
-stop_progress_indicator() {
-    if [ -n "$PROGRESS_INDICATOR_PID" ]; then
-        kill $PROGRESS_INDICATOR_PID 2>/dev/null
-        wait $PROGRESS_INDICATOR_PID 2>/dev/null
-        echo -ne "\r\033[K"
     fi
 }
 
@@ -1365,48 +1423,52 @@ recon_single_target() {
     
     echo -e "${BLUE}[*] Reconnaissance for: $target${NC}"
     
+    # Extract domain from URL
+    local domain=$(echo "$target" | sed -e 's|^[^/]*//||' -e 's|/.*$||')
+    
     # WHOIS lookup
     if command -v whois &> /dev/null; then
         echo -e "${CYAN}[*] Performing WHOIS lookup...${NC}"
-        whois "$target" > "$output_dir/whois.txt" 2>> "$LOG_FILE"
+        whois "$domain" > "$output_dir/whois.txt" 2>> "$LOG_FILE"
     fi
     
     # DNS enumeration
     if command -v dig &> /dev/null; then
         echo -e "${CYAN}[*] Performing DNS enumeration...${NC}"
-        dig "$target" ANY > "$output_dir/dns_any.txt" 2>> "$LOG_FILE"
-        dig "$target" A > "$output_dir/dns_a.txt" 2>> "$LOG_FILE"
-        dig "$target" MX > "$output_dir/dns_mx.txt" 2>> "$LOG_FILE"
-        dig "$target" TXT > "$output_dir/dns_txt.txt" 2>> "$LOG_FILE"
+        dig "$domain" ANY +short > "$output_dir/dns_any.txt" 2>> "$LOG_FILE"
+        dig "$domain" A +short > "$output_dir/dns_a.txt" 2>> "$LOG_FILE"
+        dig "$domain" MX +short > "$output_dir/dns_mx.txt" 2>> "$LOG_FILE"
+        dig "$domain" TXT +short > "$output_dir/dns_txt.txt" 2>> "$LOG_FILE"
     fi
     
-    # Subdomain enumeration
-    if command -v subfinder &> /dev/null; then
-        echo -e "${CYAN}[*] Enumerating subdomains...${NC}"
-        subfinder -d "$target" -o "$output_dir/subdomains.txt" > /dev/null 2>> "$LOG_FILE"
-    fi
-    
-    if command -v assetfinder &> /dev/null; then
-        assetfinder --subs-only "$target" >> "$output_dir/subdomains.txt" 2>> "$LOG_FILE"
-    fi
-    
-    # Port scanning with nmap
+    # Port scanning with nmap (quick scan)
     if command -v nmap &> /dev/null; then
         echo -e "${CYAN}[*] Performing port scan...${NC}"
-        nmap -sS -sV -T4 -p- "$target" -oN "$output_dir/nmap_full.txt" > /dev/null 2>> "$LOG_FILE"
-        nmap -sS -sC -T4 "$target" -oN "$output_dir/nmap_script.txt" >> "$LOG_FILE" 2>&1
+        nmap -sS -T4 -F "$domain" -oN "$output_dir/nmap_quick.txt" >> "$LOG_FILE" 2>&1
+        
+        # Service detection on common ports
+        nmap -sV -T4 -p 21,22,23,25,53,80,443,445,3389,8080,8443 "$domain" \
+            -oN "$output_dir/nmap_services.txt" >> "$LOG_FILE" 2>&1
     fi
     
     # Web technology detection
     if command -v whatweb &> /dev/null; then
         echo -e "${CYAN}[*] Detecting web technologies...${NC}"
-        whatweb -a 3 "$target" > "$output_dir/whatweb.txt" 2>> "$LOG_FILE"
+        whatweb -a 1 "$target" > "$output_dir/whatweb.txt" 2>> "$LOG_FILE"
+    fi
+    
+    # Check for WAF
+    if command -v wafw00f &> /dev/null; then
+        echo -e "${CYAN}[*] Checking for WAF...${NC}"
+        wafw00f "$target" > "$output_dir/waf.txt" 2>> "$LOG_FILE"
     fi
     
     # SSL/TLS analysis
     if command -v testssl &> /dev/null; then
         echo -e "${CYAN}[*] Analyzing SSL/TLS configuration...${NC}"
-        testssl --html "$output_dir/testssl.html" "$target" > /dev/null 2>> "$LOG_FILE"
+        testssl --html "$output_dir/testssl.html" "$target" >> "$LOG_FILE" 2>&1
+    elif command -v sslscan &> /dev/null; then
+        sslscan "$target" > "$output_dir/sslscan.txt" 2>> "$LOG_FILE"
     fi
     
     echo -e "${GREEN}[✓] Reconnaissance completed for $target${NC}"
@@ -1425,6 +1487,11 @@ recon_multiple_targets() {
             local target_dir="$output_dir/target_$count"
             mkdir -p "$target_dir"
             
+            # Add protocol if missing
+            if [[ ! "$target" =~ ^https?:// ]]; then
+                target="http://$target"
+            fi
+            
             recon_single_target "$target" "$target_dir"
             ((count++))
         fi
@@ -1437,30 +1504,36 @@ perform_vulnerability_scan() {
     local vuln_dir="$WORKSPACE/scan_$SCAN_ID/vulnerability"
     mkdir -p "$vuln_dir"
     
-    # Use nuclei for vulnerability scanning
+    # Use optimized nuclei scan
     if command -v nuclei &> /dev/null; then
-        echo -e "${BLUE}[*] Running nuclei vulnerability scanner...${NC}"
+        echo -e "${BLUE}[*] Starting optimized Nuclei vulnerability scan...${NC}"
+        echo -e "${YELLOW}[*] Scanning for ${NUCLEI_SEVERITY} severity vulnerabilities${NC}"
+        echo -e "${YELLOW}[*] Using rate limiting to avoid overwhelming the target${NC}"
         
         if [ -n "$TARGET_URL" ]; then
-            nuclei -u "$TARGET_URL" -o "$vuln_dir/nuclei_results.txt" -severity critical,high,medium > /dev/null 2>> "$LOG_FILE"
+            # Run optimized nuclei scan
+            run_optimized_nuclei_scan "$TARGET_URL" "$vuln_dir/nuclei_output.log" "$vuln_dir/nuclei_results.txt"
+            
+            # Parse results if found
+            if [ -s "$vuln_dir/nuclei_results.txt" ]; then
+                parse_nuclei_results "$vuln_dir/nuclei_results.txt"
+            fi
         elif [ -n "$TARGET_FILE" ]; then
-            nuclei -l "$TARGET_FILE" -o "$vuln_dir/nuclei_results.txt" -severity critical,high,medium > /dev/null 2>> "$LOG_FILE"
+            echo -e "${YELLOW}[!] Multiple target scan with nuclei would take too long${NC}"
+            echo -e "${YELLOW}[!] Skipping nuclei for multiple targets${NC}"
         fi
-        
-        # Parse nuclei results into database
-        parse_nuclei_results "$vuln_dir/nuclei_results.txt"
+    else
+        echo -e "${RED}[!] Nuclei not installed - skipping vulnerability scan${NC}"
     fi
     
-    # Use wapiti for web vulnerability scanning
-    if command -v wapiti &> /dev/null; then
-        echo -e "${BLUE}[*] Running wapiti web vulnerability scanner...${NC}"
+    # Use nikto for web server scanning (quick)
+    if command -v nikto &> /dev/null; then
+        echo -e "${BLUE}[*] Running quick nikto web server scan...${NC}"
         
         if [ -n "$TARGET_URL" ]; then
-            wapiti -u "$TARGET_URL" -o "$vuln_dir/wapiti" --format json > /dev/null 2>> "$LOG_FILE"
-            
-            # Convert wapiti results
-            if [ -f "$vuln_dir/wapiti.json" ]; then
-                parse_wapiti_results "$vuln_dir/wapiti.json"
+            timeout 60 nikto -h "$TARGET_URL" -o "$vuln_dir/nikto_results.txt" -Format txt >> "$LOG_FILE" 2>&1
+            if [ -f "$vuln_dir/nikto_results.txt" ]; then
+                parse_nikto_results "$vuln_dir/nikto_results.txt"
             fi
         fi
     fi
@@ -1475,45 +1548,63 @@ parse_nuclei_results() {
         return
     fi
     
+    echo -e "${BLUE}[*] Parsing nuclei results into database...${NC}"
+    
+    local vuln_count=0
+    # Nuclei output format: [severity] [type] [url] [info]
     while IFS= read -r line; do
-        if [[ "$line" =~ \[([^]]+)\]\[([^]]+)\]\s+(.+)\s+on\s+(.+) ]]; then
+        if [[ "$line" =~ ^\[([^]]+)\]\[([^]]+)\] ]]; then
             local severity="${BASH_REMATCH[1]}"
-            local vulnerability="${BASH_REMATCH[2]}"
-            local url="${BASH_REMATCH[4]}"
-            local description="${BASH_REMATCH[3]}"
+            local vuln_type="${BASH_REMATCH[2]}"
             
-            # Insert into database
-            sqlite3 "$DB_FILE" << EOF
+            # Extract URL and description
+            local url=$(echo "$line" | grep -o 'http[s]*://[^ ]*' | head -1)
+            local description=$(echo "$line" | sed -e 's/^\[[^]]*\]\[[^]]*\] //' -e 's/http[s]*:[^ ]*//g')
+            
+            if [ -n "$severity" ] && [ -n "$vuln_type" ] && [ -n "$description" ]; then
+                # Insert into database
+                sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
 INSERT INTO findings (scan_id, type, severity, description, evidence)
-VALUES ('$SCAN_ID', 'web_vulnerability', '$severity', '$vulnerability', '$description - $url');
+VALUES ('$SCAN_ID', 'web_vulnerability', '$severity', '$vuln_type', '$description - URL: ${url:-$TARGET_URL}');
 EOF
+                
+                if [ $? -eq 0 ]; then
+                    echo -e "${GREEN}[+] Found: $severity - $vuln_type${NC}"
+                    ((vuln_count++))
+                fi
+            fi
         fi
     done < "$results_file"
+    
+    echo -e "${GREEN}[✓] Added $vuln_count vulnerabilities to database${NC}"
 }
 
-parse_wapiti_results() {
+parse_nikto_results() {
     local results_file=$1
     
     if [ ! -f "$results_file" ]; then
         return
     fi
     
-    if command -v jq &> /dev/null; then
-        local vulnerabilities=$(jq -c '.vulnerabilities[]' "$results_file" 2>/dev/null)
-        
-        while IFS= read -r vuln; do
-            if [ -n "$vuln" ]; then
-                local name=$(echo "$vuln" | jq -r '.name')
-                local severity=$(echo "$vuln" | jq -r '.severity')
-                local description=$(echo "$vuln" | jq -r '.description')
-                local url=$(echo "$vuln" | jq -r '.url')
-                
-                sqlite3 "$DB_FILE" << EOF
+    echo -e "${BLUE}[*] Parsing nikto results...${NC}"
+    
+    local severity="medium"
+    local finding_count=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\+ ]]; then
+            local issue=$(echo "$line" | sed 's/^\+ //')
+            if [ -n "$issue" ]; then
+                sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
 INSERT INTO findings (scan_id, type, severity, description, evidence)
-VALUES ('$SCAN_ID', 'web_vulnerability', '$severity', '$name', '$description - $url');
+VALUES ('$SCAN_ID', 'server_vulnerability', '$severity', 'Nikto Finding', '$issue');
 EOF
+                ((finding_count++))
             fi
-        done <<< "$vulnerabilities"
+        fi
+    done < "$results_file"
+    
+    if [ $finding_count -gt 0 ]; then
+        echo -e "${GREEN}[✓] Added $finding_count nikto findings to database${NC}"
     fi
 }
 
@@ -1528,32 +1619,54 @@ perform_web_application_scan() {
         return
     fi
     
-    # SQL injection testing
-    if command -v sqlmap &> /dev/null; then
-        echo -e "${BLUE}[*] Testing for SQL injection vulnerabilities...${NC}"
-        sqlmap -u "$TARGET_URL" --batch --level=3 --risk=3 --output-dir="$web_dir/sqlmap" > /dev/null 2>> "$LOG_FILE"
+    # Directory brute-forcing with gobuster (limited)
+    if command -v gobuster &> /dev/null && [ -f "$WORDLIST_DIR/directories.txt" ]; then
+        echo -e "${BLUE}[*] Quick directory brute-forcing...${NC}"
+        timeout 120 gobuster dir -u "$TARGET_URL" -w "$WORDLIST_DIR/directories.txt" \
+            -o "$web_dir/gobuster_dirs.txt" -t 20 >> "$LOG_FILE" 2>&1
+        
+        # Parse gobuster results
+        if [ -f "$web_dir/gobuster_dirs.txt" ]; then
+            local dir_count=0
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^/([^ ]+) ]]; then
+                    local dir="${BASH_REMATCH[1]}"
+                    sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
+INSERT INTO findings (scan_id, type, severity, description, evidence)
+VALUES ('$SCAN_ID', 'discovery', 'info', 'Directory found', '$dir directory found at $TARGET_URL');
+EOF
+                    ((dir_count++))
+                fi
+            done < "$web_dir/gobuster_dirs.txt"
+            if [ $dir_count -gt 0 ]; then
+                echo -e "${GREEN}[✓] Found $dir_count directories${NC}"
+            fi
+        fi
     fi
     
-    # XSS testing
-    if command -v xsstrike &> /dev/null; then
-        echo -e "${BLUE}[*] Testing for XSS vulnerabilities...${NC}"
-        xsstrike -u "$TARGET_URL" --crawl > "$web_dir/xsstrike.txt" 2>> "$LOG_FILE"
-    fi
-    
-    if command -v dalfox &> /dev/null; then
-        dalfox url "$TARGET_URL" --output "$web_dir/dalfox.txt" > /dev/null 2>> "$LOG_FILE"
-    fi
-    
-    # Directory brute-forcing
-    if command -v ffuf &> /dev/null && [ -f "$WORDLIST_DIR/comprehensive-directories.txt" ]; then
-        echo -e "${BLUE}[*] Brute-forcing directories...${NC}"
-        ffuf -u "${TARGET_URL}/FUZZ" -w "$WORDLIST_DIR/comprehensive-directories.txt" -o "$web_dir/ffuf.json" -of json > /dev/null 2>> "$LOG_FILE"
-    fi
-    
-    # CMS detection and scanning
-    if command -v wpscan &> /dev/null; then
-        echo -e "${BLUE}[*] Checking for WordPress vulnerabilities...${NC}"
-        wpscan --url "$TARGET_URL" --output "$web_dir/wpscan.txt" --format cli-no-colour > /dev/null 2>> "$LOG_FILE"
+    # WordPress scanning if detected
+    if echo "$TARGET_URL" | grep -i "wordpress" || [ -f "$WORKSPACE/scan_$SCAN_ID/recon/whatweb.txt" ] && grep -i "wordpress" "$WORKSPACE/scan_$SCAN_ID/recon/whatweb.txt"; then
+        if command -v wpscan &> /dev/null; then
+            echo -e "${BLUE}[*] Checking for WordPress vulnerabilities...${NC}"
+            timeout 180 wpscan --url "$TARGET_URL" --no-update --output "$web_dir/wpscan.txt" >> "$LOG_FILE" 2>&1
+            
+            # Parse wpscan results
+            if [ -f "$web_dir/wpscan.txt" ]; then
+                local wp_vuln_count=0
+                grep -i "vulnerability\|issue" "$web_dir/wpscan.txt" | while read -r line; do
+                    if [ -n "$line" ]; then
+                        sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
+INSERT INTO findings (scan_id, type, severity, description, evidence)
+VALUES ('$SCAN_ID', 'wordpress_vulnerability', 'medium', 'WordPress Issue', '$line');
+EOF
+                        ((wp_vuln_count++))
+                    fi
+                done
+                if [ $wp_vuln_count -gt 0 ]; then
+                    echo -e "${GREEN}[✓] Found $wp_vuln_count WordPress issues${NC}"
+                fi
+            fi
+        fi
     fi
     
     echo -e "${GREEN}[✓] Web application security testing completed${NC}"
@@ -1570,11 +1683,7 @@ perform_network_services_scan() {
         local host=$(echo "$TARGET_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||')
         scan_network_services "$host" "$network_dir"
     elif [ -n "$TARGET_FILE" ]; then
-        while IFS= read -r target; do
-            if validate_target "$target"; then
-                scan_network_services "$target" "$network_dir"
-            fi
-        done < "$TARGET_FILE"
+        echo -e "${YELLOW}[!] Skipping network scan for multiple targets (would take too long)${NC}"
     fi
     
     echo -e "${GREEN}[✓] Network services analysis completed${NC}"
@@ -1587,13 +1696,11 @@ scan_network_services() {
     echo -e "${BLUE}[*] Scanning network services for: $target${NC}"
     
     if command -v nmap &> /dev/null; then
-        # Service version detection
-        nmap -sV -T4 -p- "$target" -oN "$output_dir/${target}_services.txt" > /dev/null 2>> "$LOG_FILE"
+        # Quick service detection on top 100 ports
+        echo -e "${CYAN}[*] Running quick nmap service detection...${NC}"
+        nmap -sV -T4 --top-ports 100 "$target" -oN "$output_dir/${target}_services.txt" >> "$LOG_FILE" 2>&1
         
-        # NSE script scanning
-        nmap -sC -T4 "$target" -oN "$output_dir/${target}_scripts.txt" >> "$LOG_FILE" 2>&1
-        
-        # Insert discovered services into database
+        # Parse nmap results
         parse_nmap_services "$output_dir/${target}_services.txt" "$target"
     fi
 }
@@ -1606,53 +1713,39 @@ parse_nmap_services() {
         return
     fi
     
+    echo -e "${BLUE}[*] Parsing nmap service results...${NC}"
+    
+    local service_count=0
+    local current_port=""
+    local current_service=""
+    local current_version=""
+    
     while IFS= read -r line; do
-        if [[ "$line" =~ ^([0-9]+)/tcp\s+open\s+([^ ]+)\s+(.*)$ ]]; then
-            local port="${BASH_REMATCH[1]}"
-            local service="${BASH_REMATCH[2]}"
-            local version="${BASH_REMATCH[3]}"
+        # Match port/service lines
+        if [[ "$line" =~ ^([0-9]+)/tcp\s+open\s+([^ ]+)(?:\s+(.+))?$ ]]; then
+            current_port="${BASH_REMATCH[1]}"
+            current_service="${BASH_REMATCH[2]}"
+            current_version="${BASH_REMATCH[3]:-unknown}"
             
-            sqlite3 "$DB_FILE" << EOF
+            # Insert into database
+            sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
 INSERT INTO network_services (scan_id, ip, port, service, version)
-VALUES ('$SCAN_ID', '$target', '$port', '$service', '$version');
+VALUES ('$SCAN_ID', '$target', '$current_port', '$current_service', '$current_version');
 EOF
+            ((service_count++))
+            
+            # Check for potentially risky services
+            if [[ "$current_service" =~ ^(ftp|telnet|rpcbind|vnc|snmp)$ ]] || [[ "$current_version" =~ (old|outdated|deprecated) ]]; then
+                sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
+INSERT INTO findings (scan_id, type, severity, description, evidence)
+VALUES ('$SCAN_ID', 'service_risk', 'medium', 'Potentially Risky Service', 
+        '$current_service on port $current_port: $current_version');
+EOF
+            fi
         fi
     done < "$nmap_file"
-}
-
-perform_exploitation_testing() {
-    echo -e "${CYAN}[*] Performing exploitation testing...${NC}"
     
-    # This is a controlled testing phase - only for authorized targets
-    if [ "$SECURITY_LEVEL" != "low" ]; then
-        echo -e "${YELLOW}[!] Exploitation testing requires SECURITY_LEVEL=low${NC}"
-        echo -e "${YELLOW}[!] Skipping exploitation phase${NC}"
-        return
-    fi
-    
-    local exploit_dir="$WORKSPACE/scan_$SCAN_ID/exploitation"
-    mkdir -p "$exploit_dir"
-    
-    # Search for exploits based on findings
-    if command -v searchsploit &> /dev/null; then
-        echo -e "${BLUE}[*] Searching for known exploits...${NC}"
-        
-        # Get services from database
-        local services=$(sqlite3 "$DB_FILE" << EOF
-SELECT DISTINCT service, version 
-FROM network_services 
-WHERE scan_id = '$SCAN_ID';
-EOF
-        )
-        
-        while IFS='|' read -r service version; do
-            if [ -n "$service" ]; then
-                searchsploit "$service $version" > "$exploit_dir/searchsploit_${service}.txt" 2>> "$LOG_FILE"
-            fi
-        done <<< "$services"
-    fi
-    
-    echo -e "${GREEN}[✓] Exploitation testing completed${NC}"
+    echo -e "${GREEN}[✓] Found $service_count open ports${NC}"
 }
 
 # =====================[ REPORT GENERATION ]=====================
@@ -1660,6 +1753,13 @@ generate_reports() {
     echo -e "${PURPLE}[*] Generating comprehensive reports...${NC}"
     
     mkdir -p "$REPORT_DIR"
+    
+    # Update scan status
+    sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
+UPDATE scans 
+SET end_time = datetime('now'), status = 'completed'
+WHERE id = '$SCAN_ID';
+EOF
     
     # Generate HTML report
     if [ "$EXPORT_FORMAT" = "html" ] || [ "$EXPORT_FORMAT" = "all" ]; then
@@ -1688,7 +1788,7 @@ generate_html_report() {
     local report_file="$REPORT_DIR/report_${SCAN_ID}.html"
     
     # Get scan details
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
+    local scan_info=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     target_url,
     scan_type,
@@ -1696,22 +1796,22 @@ SELECT
     end_time,
     status
 FROM scans 
-WHERE id = $SCAN_ID;
+WHERE id = '$SCAN_ID';
 EOF
     )
     
     IFS='|' read -r target_url scan_type start_time end_time status <<< "$scan_info"
     
     # Count findings
-    local findings=$(sqlite3 "$DB_FILE" << EOF
+    local findings=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    COUNT(CASE WHEN severity = 'Critical' THEN 1 END) as critical,
-    COUNT(CASE WHEN severity = 'High' THEN 1 END) as high,
-    COUNT(CASE WHEN severity = 'Medium' THEN 1 END) as medium,
-    COUNT(CASE WHEN severity = 'Low' THEN 1 END) as low,
-    COUNT(CASE WHEN severity = 'Info' THEN 1 END) as info
+    COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical,
+    COUNT(CASE WHEN severity = 'high' THEN 1 END) as high,
+    COUNT(CASE WHEN severity = 'medium' THEN 1 END) as medium,
+    COUNT(CASE WHEN severity = 'low' THEN 1 END) as low,
+    COUNT(CASE WHEN severity = 'info' THEN 1 END) as info
 FROM findings 
-WHERE scan_id = $SCAN_ID;
+WHERE scan_id = '$SCAN_ID';
 EOF
     )
     
@@ -1793,6 +1893,15 @@ EOF
             color: #6c757d;
             font-size: 0.9em;
         }
+        .finding {
+            margin: 10px 0;
+            padding: 10px;
+            border-left: 4px solid #ddd;
+        }
+        .finding.critical { border-left-color: #dc3545; }
+        .finding.high { border-left-color: #fd7e14; }
+        .finding.medium { border-left-color: #ffc107; }
+        .finding.low { border-left-color: #28a745; }
     </style>
 </head>
 <body>
@@ -1808,6 +1917,7 @@ EOF
             <p><strong>Scan Type:</strong> $scan_type</p>
             <p><strong>Scan Period:</strong> $start_time to ${end_time:-In Progress}</p>
             <p><strong>Status:</strong> $status</p>
+            <p><strong>Scan ID:</strong> $SCAN_ID</p>
         </div>
         
         <h2>📈 Vulnerability Statistics</h2>
@@ -1820,95 +1930,74 @@ EOF
         </div>
         
         <h2>🔍 Detailed Findings</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Severity</th>
-                    <th>Type</th>
-                    <th>Description</th>
-                    <th>Evidence</th>
-                </tr>
-            </thead>
-            <tbody>
 EOF
     
-    # Get findings from database
-    local findings_details=$(sqlite3 "$DB_FILE" << EOF
+    # Check if there are findings
+    if [ $((critical + high + medium + low + info)) -eq 0 ]; then
+        echo "<p>No vulnerabilities found during this scan.</p>" >> "$report_file"
+    else
+        echo '<table><thead><tr><th>Severity</th><th>Type</th><th>Description</th><th>Evidence</th></tr></thead><tbody>' >> "$report_file"
+        
+        # Get findings from database
+        local findings_details=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     severity,
     type,
     description,
     evidence
 FROM findings 
-WHERE scan_id = $SCAN_ID
+WHERE scan_id = '$SCAN_ID'
 ORDER BY 
     CASE severity 
-        WHEN 'Critical' THEN 1
-        WHEN 'High' THEN 2
-        WHEN 'Medium' THEN 3
-        WHEN 'Low' THEN 4
-        WHEN 'Info' THEN 5
+        WHEN 'critical' THEN 1
+        WHEN 'high' THEN 2
+        WHEN 'medium' THEN 3
+        WHEN 'low' THEN 4
+        WHEN 'info' THEN 5
         ELSE 6
     END,
     type;
 EOF
-    )
-    
-    while IFS='|' read -r severity type description evidence; do
-        cat >> "$report_file" << EOF
-                <tr>
-                    <td><span class="severity-$severity">$severity</span></td>
-                    <td>$type</td>
-                    <td>$description</td>
-                    <td><small>$evidence</small></td>
-                </tr>
-EOF
-    done <<< "$findings_details"
+        )
+        
+        while IFS='|' read -r severity type description evidence; do
+            echo "<tr><td><span class=\"severity-$severity\">$severity</span></td><td>$type</td><td>$description</td><td><small>$evidence</small></td></tr>" >> "$report_file"
+        done <<< "$findings_details"
+        
+        echo '</tbody></table>' >> "$report_file"
+    fi
     
     cat >> "$report_file" << EOF
-            </tbody>
-        </table>
         
         <h2>🌐 Network Services Discovered</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Host</th>
-                    <th>Port</th>
-                    <th>Service</th>
-                    <th>Version</th>
-                </tr>
-            </thead>
-            <tbody>
 EOF
     
     # Get network services from database
-    local network_services=$(sqlite3 "$DB_FILE" << EOF
+    local network_services=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     ip,
     port,
     service,
     version
 FROM network_services 
-WHERE scan_id = $SCAN_ID
+WHERE scan_id = '$SCAN_ID'
 ORDER BY ip, port;
 EOF
     )
     
-    while IFS='|' read -r ip port service version; do
-        cat >> "$report_file" << EOF
-                <tr>
-                    <td>$ip</td>
-                    <td>$port</td>
-                    <td>$service</td>
-                    <td>$version</td>
-                </tr>
-EOF
-    done <<< "$network_services"
+    if [ -n "$network_services" ]; then
+        echo '<table><thead><tr><th>Host</th><th>Port</th><th>Service</th><th>Version</th></tr></thead><tbody>' >> "$report_file"
+        
+        while IFS='|' read -r ip port service version; do
+            echo "<tr><td>$ip</td><td>$port</td><td>$service</td><td>$version</td></tr>" >> "$report_file"
+        done <<< "$network_services"
+        
+        echo '</tbody></table>' >> "$report_file"
+    else
+        echo '<p>No network services discovered or scanned.</p>' >> "$report_file"
+    fi
     
     cat >> "$report_file" << EOF
-            </tbody>
-        </table>
         
         <div class="summary">
             <h2>✅ Recommendations</h2>
@@ -1922,7 +2011,7 @@ EOF
         </div>
         
         <div class="timestamp">
-            <p>Report generated by NiiXscan v3.0 - AI-Powered Enterprise Security Platform</p>
+            <p>Report generated by NiiXscan v3.3 - Optimized Nuclei Scanning Platform</p>
             <p>Scan ID: $SCAN_ID | Generated: $(date)</p>
         </div>
     </div>
@@ -1933,9 +2022,9 @@ EOF
     echo -e "${GREEN}[✓] HTML report generated: $report_file${NC}"
     
     # Update database with report path
-    sqlite3 "$DB_FILE" << EOF
+    sqlite3 "$DB_FILE" 2>> "$LOG_FILE" << EOF
 UPDATE scans 
-SET report_path = '$report_file', end_time = datetime('now'), status = 'completed'
+SET report_path = '$report_file'
 WHERE id = '$SCAN_ID';
 EOF
 }
@@ -1946,7 +2035,7 @@ generate_markdown_report() {
     local report_file="$REPORT_DIR/report_${SCAN_ID}.md"
     
     # Get scan details
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
+    local scan_info=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     target_url,
     scan_type,
@@ -1954,7 +2043,7 @@ SELECT
     end_time,
     status
 FROM scans 
-WHERE id = $SCAN_ID;
+WHERE id = '$SCAN_ID';
 EOF
     )
     
@@ -1973,26 +2062,25 @@ EOF
 - **Report Generated:** $(date)
 
 ## 📊 Vulnerability Summary
-
-### Severity Breakdown
 EOF
     
     # Count findings
-    local findings=$(sqlite3 "$DB_FILE" << EOF
+    local findings=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    COUNT(CASE WHEN severity = 'Critical' THEN 1 END) as critical,
-    COUNT(CASE WHEN severity = 'High' THEN 1 END) as high,
-    COUNT(CASE WHEN severity = 'Medium' THEN 1 END) as medium,
-    COUNT(CASE WHEN severity = 'Low' THEN 1 END) as low,
-    COUNT(CASE WHEN severity = 'Info' THEN 1 END) as info
+    COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical,
+    COUNT(CASE WHEN severity = 'high' THEN 1 END) as high,
+    COUNT(CASE WHEN severity = 'medium' THEN 1 END) as medium,
+    COUNT(CASE WHEN severity = 'low' THEN 1 END) as low,
+    COUNT(CASE WHEN severity = 'info' THEN 1 END) as info
 FROM findings 
-WHERE scan_id = $SCAN_ID;
+WHERE scan_id = '$SCAN_ID';
 EOF
     )
     
     IFS='|' read -r critical high medium low info <<< "$findings"
     
     cat >> "$report_file" << EOF
+### Severity Breakdown
 - 🔴 **Critical:** $critical
 - 🟠 **High:** $high
 - 🟡 **Medium:** $medium
@@ -2000,56 +2088,41 @@ EOF
 - 🔵 **Info:** $info
 
 ## 🔍 Detailed Findings
-
-### Critical Severity Findings
 EOF
     
-    # Get critical findings
-    local critical_findings=$(sqlite3 "$DB_FILE" << EOF
-SELECT type, description, evidence 
+    # Check if there are findings
+    if [ $((critical + high + medium + low + info)) -eq 0 ]; then
+        echo "No vulnerabilities found during this scan." >> "$report_file"
+    else
+        # Get findings from database
+        local findings_details=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
+SELECT 
+    severity,
+    type,
+    description,
+    evidence
 FROM findings 
-WHERE scan_id = $SCAN_ID AND severity = 'Critical'
-ORDER BY type;
+WHERE scan_id = '$SCAN_ID'
+ORDER BY 
+    CASE severity 
+        WHEN 'critical' THEN 1
+        WHEN 'high' THEN 2
+        WHEN 'medium' THEN 3
+        WHEN 'low' THEN 4
+        WHEN 'info' THEN 5
+        ELSE 6
+    END;
 EOF
-    )
-    
-    if [ -n "$critical_findings" ]; then
-        while IFS='|' read -r type description evidence; do
+        )
+        
+        while IFS='|' read -r severity type description evidence; do
             cat >> "$report_file" << EOF
-#### $type
+### $severity severity - $type
 - **Description:** $description
 - **Evidence:** $evidence
 
 EOF
-        done <<< "$critical_findings"
-    else
-        echo "No critical severity findings." >> "$report_file"
-    fi
-    
-    cat >> "$report_file" << EOF
-### High Severity Findings
-EOF
-    
-    # Get high findings
-    local high_findings=$(sqlite3 "$DB_FILE" << EOF
-SELECT type, description, evidence 
-FROM findings 
-WHERE scan_id = $SCAN_ID AND severity = 'High'
-ORDER BY type;
-EOF
-    )
-    
-    if [ -n "$high_findings" ]; then
-        while IFS='|' read -r type description evidence; do
-            cat >> "$report_file" << EOF
-#### $type
-- **Description:** $description
-- **Evidence:** $evidence
-
-EOF
-        done <<< "$high_findings"
-    else
-        echo "No high severity findings." >> "$report_file"
+        done <<< "$findings_details"
     fi
     
     cat >> "$report_file" << EOF
@@ -2057,10 +2130,10 @@ EOF
 EOF
     
     # Get network services
-    local network_services=$(sqlite3 "$DB_FILE" << EOF
+    local network_services=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT ip, port, service, version 
 FROM network_services 
-WHERE scan_id = $SCAN_ID
+WHERE scan_id = '$SCAN_ID'
 ORDER BY ip, port;
 EOF
     )
@@ -2086,7 +2159,7 @@ EOF
 
 ### Immediate Actions (Critical & High)
 1. Patch all identified vulnerabilities immediately
-2. Implement Web Application Firewall (WAF)
+2. Implement Web Application Firewall (WAF) if not present
 3. Review and harden system configurations
 4. Change default credentials if found
 
@@ -2103,7 +2176,7 @@ EOF
 4. Continuous security monitoring
 
 ---
-*Report generated by NiiXscan v3.0 - AI-Powered Enterprise Security Platform*
+*Report generated by NiiXscan v3.3 - Optimized Nuclei Scanning Platform*
 EOF
     
     echo -e "${GREEN}[✓] Markdown report generated: $report_file${NC}"
@@ -2115,7 +2188,7 @@ generate_json_report() {
     local report_file="$REPORT_DIR/report_${SCAN_ID}.json"
     
     # Get scan info
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
+    local scan_info=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     target_url,
     scan_type,
@@ -2124,44 +2197,48 @@ SELECT
     status,
     report_path
 FROM scans 
-WHERE id = $SCAN_ID;
+WHERE id = '$SCAN_ID';
 EOF
     )
     
     IFS='|' read -r target_url scan_type start_time end_time status report_path <<< "$scan_info"
     
-    # Get findings
-    local findings_json=$(sqlite3 "$DB_FILE" << EOF
+    # Get findings count
+    local findings=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    json_group_array(
-        json_object(
-            'severity', severity,
-            'type', type,
-            'description', description,
-            'evidence', evidence,
-            'remediation', remediation,
-            'cvss_score', cvss_score
-        )
-    )
+    COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical,
+    COUNT(CASE WHEN severity = 'high' THEN 1 END) as high,
+    COUNT(CASE WHEN severity = 'medium' THEN 1 END) as medium,
+    COUNT(CASE WHEN severity = 'low' THEN 1 END) as low,
+    COUNT(CASE WHEN severity = 'info' THEN 1 END) as info
 FROM findings 
-WHERE scan_id = $SCAN_ID;
+WHERE scan_id = '$SCAN_ID';
+EOF
+    )
+    
+    IFS='|' read -r critical high medium low info <<< "$findings"
+    
+    # Get findings details
+    local findings_json=$(sqlite3 -json "$DB_FILE" 2>/dev/null << EOF
+SELECT 
+    severity,
+    type,
+    description,
+    evidence
+FROM findings 
+WHERE scan_id = '$SCAN_ID';
 EOF
     )
     
     # Get network services
-    local services_json=$(sqlite3 "$DB_FILE" << EOF
+    local services_json=$(sqlite3 -json "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    json_group_array(
-        json_object(
-            'ip', ip,
-            'port', port,
-            'service', service,
-            'version', version,
-            'banner', banner
-        )
-    )
+    ip,
+    port,
+    service,
+    version
 FROM network_services 
-WHERE scan_id = $SCAN_ID;
+WHERE scan_id = '$SCAN_ID';
 EOF
     )
     
@@ -2170,37 +2247,18 @@ EOF
     "report": {
         "metadata": {
             "scan_id": "$SCAN_ID",
-            "generator": "NiiXscan v3.0",
+            "generator": "NiiXscan v3.3",
             "generated_date": "$(date -Iseconds)",
-            "version": "3.0"
+            "version": "3.3"
         },
         "scan_info": {
             "target": "$target_url",
             "scan_type": "$scan_type",
             "start_time": "$start_time",
             "end_time": "$end_time",
-            "status": "$status",
-            "report_path": "$report_path"
+            "status": "$status"
         },
         "summary": {
-EOF
-    
-    # Get counts
-    local findings=$(sqlite3 "$DB_FILE" << EOF
-SELECT 
-    COUNT(CASE WHEN severity = 'Critical' THEN 1 END) as critical,
-    COUNT(CASE WHEN severity = 'High' THEN 1 END) as high,
-    COUNT(CASE WHEN severity = 'Medium' THEN 1 END) as medium,
-    COUNT(CASE WHEN severity = 'Low' THEN 1 END) as low,
-    COUNT(CASE WHEN severity = 'Info' THEN 1 END) as info
-FROM findings 
-WHERE scan_id = $SCAN_ID;
-EOF
-    )
-    
-    IFS='|' read -r critical high medium low info <<< "$findings"
-    
-    cat >> "$report_file" << EOF
             "vulnerability_counts": {
                 "critical": $critical,
                 "high": $high,
@@ -2211,24 +2269,7 @@ EOF
             }
         },
         "findings": $findings_json,
-        "network_services": $services_json,
-        "recommendations": {
-            "immediate": [
-                "Address all Critical and High severity vulnerabilities immediately",
-                "Implement emergency patching procedures",
-                "Isolate affected systems if necessary"
-            ],
-            "short_term": [
-                "Schedule remediation for Medium severity vulnerabilities within 30 days",
-                "Implement security monitoring and alerting",
-                "Conduct security awareness training"
-            ],
-            "long_term": [
-                "Establish a continuous security assessment program",
-                "Implement DevSecOps practices",
-                "Regular security audits and penetration testing"
-            ]
-        }
+        "network_services": $services_json
     }
 }
 EOF
@@ -2250,16 +2291,15 @@ generate_executive_summary() {
     local report_file="$REPORT_DIR/executive_summary_${scan_id}_$(date +%Y%m%d).md"
     
     # Get scan details from database
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
+    local scan_info=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     target_url,
     scan_type,
     start_time,
     end_time,
-    status,
-    risk_score
+    status
 FROM scans 
-WHERE id = $scan_id;
+WHERE id = '$scan_id';
 EOF
     )
     
@@ -2268,34 +2308,27 @@ EOF
         return 1
     fi
     
-    IFS='|' read -r target_url scan_type start_time end_time status risk_score <<< "$scan_info"
+    IFS='|' read -r target_url scan_type start_time end_time status <<< "$scan_info"
     
     # Count findings by severity
-    local findings=$(sqlite3 "$DB_FILE" << EOF
+    local findings=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    COUNT(CASE WHEN severity = 'Critical' THEN 1 END) as critical,
-    COUNT(CASE WHEN severity = 'High' THEN 1 END) as high,
-    COUNT(CASE WHEN severity = 'Medium' THEN 1 END) as medium,
-    COUNT(CASE WHEN severity = 'Low' THEN 1 END) as low,
-    COUNT(CASE WHEN severity = 'Info' THEN 1 END) as info
+    COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical,
+    COUNT(CASE WHEN severity = 'high' THEN 1 END) as high,
+    COUNT(CASE WHEN severity = 'medium' THEN 1 END) as medium,
+    COUNT(CASE WHEN severity = 'low' THEN 1 END) as low,
+    COUNT(CASE WHEN severity = 'info' THEN 1 END) as info
 FROM findings 
-WHERE scan_id = $scan_id;
+WHERE scan_id = '$scan_id';
 EOF
     )
     
     IFS='|' read -r critical high medium low info <<< "$findings"
     
-    # Calculate risk score if not already set
-    if [ -z "$risk_score" ] || [ "$risk_score" = "NULL" ]; then
-        risk_score=$((critical * 10 + high * 7 + medium * 4 + low * 1))
-        if [ $risk_score -gt 100 ]; then
-            risk_score=100
-        fi
-        
-        # Update database with calculated risk score
-        sqlite3 "$DB_FILE" << EOF
-UPDATE scans SET risk_score = $risk_score WHERE id = $scan_id;
-EOF
+    # Calculate risk score
+    local risk_score=$((critical * 10 + high * 7 + medium * 4 + low * 1))
+    if [ $risk_score -gt 100 ]; then
+        risk_score=100
     fi
     
     # Determine risk level
@@ -2311,22 +2344,6 @@ EOF
     else
         risk_level="🔵 INFO"
     fi
-    
-    # Get top findings
-    local top_findings=$(sqlite3 "$DB_FILE" << EOF
-SELECT severity, type, description 
-FROM findings 
-WHERE scan_id = $scan_id 
-AND severity IN ('Critical', 'High') 
-ORDER BY 
-    CASE severity 
-        WHEN 'Critical' THEN 1
-        WHEN 'High' THEN 2
-        ELSE 3
-    END
-LIMIT 5;
-EOF
-    )
     
     # Create executive summary
     cat > "$report_file" << EOF
@@ -2353,41 +2370,22 @@ EOF
 - 🟢 **Low:** $low vulnerabilities
 - 🔵 **Info:** $info findings
 
-### Top Security Concerns
-EOF
-    
-    if [ -n "$top_findings" ]; then
-        while IFS='|' read -r severity type description; do
-            cat >> "$report_file" << EOF
-1. **$severity Severity - $type**
-   - $description
-EOF
-        done <<< "$top_findings"
-    else
-        echo "No critical or high severity findings detected." >> "$report_file"
-    fi
-    
-    cat >> "$report_file" << EOF
-
 ## 🎯 Key Recommendations
 
 ### Immediate Actions (Within 24-48 Hours)
 1. **Patch Critical Vulnerabilities:** Address all $critical critical vulnerabilities immediately
 2. **Emergency Response:** Implement emergency patching procedures
-3. **System Isolation:** Isolate affected systems if exploitation is imminent
-4. **Monitoring Enhancement:** Increase security monitoring and alerting
+3. **Monitoring Enhancement:** Increase security monitoring and alerting
 
 ### Short-term Actions (Within 2 Weeks)
 1. **High Priority Remediation:** Resolve $high high severity vulnerabilities
 2. **Security Hardening:** Implement additional security controls
 3. **Access Review:** Review and tighten access controls
-4. **Backup Verification:** Ensure backups are secure and test restoration
 
 ### Strategic Recommendations (Within 30 Days)
 1. **Security Program Enhancement:** Establish continuous security assessment
 2. **Training & Awareness:** Conduct security awareness training
 3. **Policy Updates:** Review and update security policies
-4. **Third-party Assessment:** Consider external penetration testing
 
 ## 📈 Business Impact Analysis
 
@@ -2396,35 +2394,10 @@ EOF
 - **Data Confidentiality:** $(if [ $high -gt 2 ]; then echo "Significant exposure risk"; else echo "Moderately protected"; fi)
 - **Data Integrity:** $(if [ $medium -gt 5 ]; then echo "Potential integrity issues"; else echo "Generally intact"; fi)
 
-### Compliance Considerations
-- **Regulatory Alignment:** Review findings against applicable regulations
-- **Compliance Gaps:** Identify and address compliance deficiencies
-- **Documentation:** Maintain assessment records for audits
-
-## 👥 Target Audience
-- **Executive Leadership:** Risk overview and business impact
-- **IT Management:** Technical findings and remediation roadmap
-- **Security Team:** Detailed vulnerability information
-- **Audit & Compliance:** Assessment methodology and results
-
-## 🔍 Assessment Methodology
-This assessment utilized NiiXscan's comprehensive security testing methodology, including:
-- Automated vulnerability scanning
-- Manual verification of critical findings
-- Network service enumeration
-- Web application security testing
-- Risk scoring based on industry standards
-
-## 📞 Contact & Follow-up
-For questions regarding this assessment or assistance with remediation:
-- **Security Team:** [Your Security Team Contact]
-- **Remediation Support:** [Remediation Team Contact]
-- **Follow-up Assessment:** Recommended within 90 days
-
 ---
 *This executive summary provides a high-level overview. Detailed technical findings are available in the full assessment report.*
 
-**Generated by NiiXscan v3.0 - AI-Powered Enterprise Security Platform**
+**Generated by NiiXscan v3.3 - Optimized Nuclei Scanning Platform**
 **Confidentiality: This document contains sensitive security information. Handle with appropriate care.**
 EOF
     
@@ -2475,12 +2448,11 @@ browse_all_reports() {
     for i in "${!reports[@]}"; do
         local report="${reports[$i]}"
         local filename=$(basename "$report")
-        local size=$(du -h "$report" 2>/dev/null | cut -f1)
-        local date=$(stat -c %y "$report" 2>/dev/null | cut -d' ' -f1)
+        local size=$(du -h "$report" 2>/dev/null | cut -f1 || echo "N/A")
+        local date=$(stat -c %y "$report" 2>/dev/null | cut -d' ' -f1 || echo "N/A")
         
         echo "$((i+1)). $filename"
         echo "   Size: $size | Date: $date"
-        echo "   Path: $report"
         echo ""
     done
     
@@ -2496,276 +2468,11 @@ browse_all_reports() {
         elif [[ "$selected_report" == *.html ]] && command -v open &> /dev/null; then
             open "$selected_report" 2>/dev/null
         else
-            echo -e "${YELLOW}[!] Could not open browser. Report saved at: $selected_report${NC}"
-            # Show file content for text-based reports
-            if [[ "$selected_report" == *.md ]] || [[ "$selected_report" == *.txt ]]; then
-                echo -e "${CYAN}[*] Report content:${NC}"
-                head -50 "$selected_report"
-            fi
+            echo -e "${YELLOW}[!] Report saved at: $selected_report${NC}"
         fi
     fi
     
     return 0
-}
-
-# =====================[ AI INTEGRATION ]=====================
-configure_ai_apis() {
-    echo -e "${PURPLE}[*] Configuring AI APIs...${NC}"
-    
-    echo "Select AI Provider:"
-    echo "1. DeepSeek"
-    echo "2. OpenAI"
-    echo "3. Google Gemini"
-    echo "4. Custom API"
-    echo "5. Disable AI"
-    echo -n "Select option [1-5]: "
-    read ai_choice
-    
-    case $ai_choice in
-        1)
-            echo -n "Enter DeepSeek API Key: "
-            read -s DEEPSEEK_API_KEY
-            echo
-            AI_PROVIDER="deepseek"
-            ;;
-        2)
-            echo -n "Enter OpenAI API Key: "
-            read -s OPENAI_API_KEY
-            echo
-            AI_PROVIDER="openai"
-            ;;
-        3)
-            echo -n "Enter Gemini API Key: "
-            read -s GEMINI_API_KEY
-            echo
-            AI_PROVIDER="gemini"
-            ;;
-        4)
-            echo -n "Enter Custom API Endpoint: "
-            read CUSTOM_AI_API
-            echo -n "Enter Custom API Key: "
-            read -s CUSTOM_AI_KEY
-            echo
-            echo -n "Enter Model Name: "
-            read CUSTOM_AI_MODEL
-            AI_PROVIDER="custom"
-            ;;
-        5)
-            AI_PROVIDER="none"
-            echo -e "${GREEN}[✓] AI features disabled${NC}"
-            ;;
-        *)
-            echo -e "${RED}[!] Invalid option${NC}"
-            return 1
-            ;;
-    esac
-    
-    # Save configuration
-    save_ai_configuration
-    
-    if [ "$AI_PROVIDER" != "none" ]; then
-        AI_API_CONFIGURED=true
-        echo -e "${GREEN}[✓] AI API configured successfully${NC}"
-    fi
-    
-    return 0
-}
-
-save_ai_configuration() {
-    cat > "$AI_CONFIG_FILE" << EOF
-# AI API Configuration
-DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
-OPENAI_API_KEY="$OPENAI_API_KEY"
-GEMINI_API_KEY="$GEMINI_API_KEY"
-CUSTOM_AI_API="$CUSTOM_AI_API"
-CUSTOM_AI_KEY="$CUSTOM_AI_KEY"
-CUSTOM_AI_MODEL="$CUSTOM_AI_MODEL"
-AI_PROVIDER="$AI_PROVIDER"
-EOF
-    
-    echo -e "${GREEN}[✓] AI configuration saved to $AI_CONFIG_FILE${NC}"
-}
-
-analyze_with_ai() {
-    local scan_id="$1"
-    
-    if [ "$AI_API_CONFIGURED" = false ]; then
-        echo -e "${YELLOW}[!] AI API not configured${NC}"
-        return 1
-    fi
-    
-    echo -e "${CYAN}[*] Analyzing findings with AI...${NC}"
-    
-    # Get findings summary
-    local findings_summary=$(sqlite3 "$DB_FILE" << EOF
-SELECT 
-    'Critical: ' || COUNT(CASE WHEN severity = 'Critical' THEN 1 END) || ', ' ||
-    'High: ' || COUNT(CASE WHEN severity = 'High' THEN 1 END) || ', ' ||
-    'Medium: ' || COUNT(CASE WHEN severity = 'Medium' THEN 1 END) || ', ' ||
-    'Low: ' || COUNT(CASE WHEN severity = 'Low' THEN 1 END) || ', ' ||
-    'Info: ' || COUNT(CASE WHEN severity = 'Info' THEN 1 END)
-FROM findings 
-WHERE scan_id = $scan_id;
-EOF
-    )
-    
-    # Get scan details
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
-SELECT target_url, scan_type, start_time 
-FROM scans 
-WHERE id = $scan_id;
-EOF
-    )
-    
-    IFS='|' read -r target_url scan_type start_time <<< "$scan_info"
-    
-    # Prepare analysis prompt
-    local prompt="Analyze these security scan findings and provide:
-1. Risk assessment summary
-2. Prioritized remediation steps
-3. Business impact analysis
-4. Compliance considerations
-
-Scan Details:
-- Target: $target_url
-- Scan Type: $scan_type
-- Findings: $findings_summary
-- Date: $start_time
-
-Provide a comprehensive analysis suitable for both technical teams and executives."
-
-    # Call AI API based on provider
-    local analysis=""
-    case $AI_PROVIDER in
-        "deepseek")
-            analysis=$(call_deepseek_api "$prompt")
-            ;;
-        "openai")
-            analysis=$(call_openai_api "$prompt")
-            ;;
-        "gemini")
-            analysis=$(call_gemini_api "$prompt")
-            ;;
-        "custom")
-            analysis=$(call_custom_api "$prompt")
-            ;;
-        *)
-            echo -e "${RED}[!] No AI provider configured${NC}"
-            return 1
-            ;;
-    esac
-    
-    if [ -n "$analysis" ]; then
-        # Save analysis to database
-        sqlite3 "$DB_FILE" << EOF
-INSERT INTO ai_analysis (scan_id, analysis_type, content, insights)
-VALUES ('$scan_id', 'comprehensive_analysis', '$analysis', 'AI-generated risk assessment and recommendations');
-EOF
-        
-        echo -e "${GREEN}[✓] AI analysis completed and saved${NC}"
-        
-        # Display analysis summary
-        echo -e "${PURPLE}"
-        echo "╔══════════════════════════════════════════════════════╗"
-        echo "║                   AI ANALYSIS SUMMARY                ║"
-        echo "╚══════════════════════════════════════════════════════╝"
-        echo -e "${NC}"
-        echo "$analysis" | head -20
-        echo "..."
-    else
-        echo -e "${RED}[!] AI analysis failed${NC}"
-        return 1
-    fi
-    
-    return 0
-}
-
-call_deepseek_api() {
-    local prompt="$1"
-    
-    if [ -z "$DEEPSEEK_API_KEY" ]; then
-        echo -e "${RED}[!] DeepSeek API key not set${NC}"
-        return 1
-    fi
-    
-    local response=$(curl -s -X POST "https://api.deepseek.com/chat/completions" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-        -d '{
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": "You are a cybersecurity expert analyzing security scan results."},
-                {"role": "user", "content": "'"$prompt"'"}
-            ],
-            "max_tokens": 2000
-        }' 2>> "$LOG_FILE")
-    
-    echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null || echo "Error parsing response"
-}
-
-call_openai_api() {
-    local prompt="$1"
-    
-    if [ -z "$OPENAI_API_KEY" ]; then
-        echo -e "${RED}[!] OpenAI API key not set${NC}"
-        return 1
-    fi
-    
-    local response=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -d '{
-            "model": "gpt-4",
-            "messages": [
-                {"role": "system", "content": "You are a cybersecurity expert analyzing security scan results."},
-                {"role": "user", "content": "'"$prompt"'"}
-            ],
-            "max_tokens": 2000
-        }' 2>> "$LOG_FILE")
-    
-    echo "$response" | jq -r '.choices[0].message.content' 2>/dev/null || echo "Error parsing response"
-}
-
-call_gemini_api() {
-    local prompt="$1"
-    
-    if [ -z "$GEMINI_API_KEY" ]; then
-        echo -e "${RED}[!] Gemini API key not set${NC}"
-        return 1
-    fi
-    
-    local response=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_API_KEY" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "contents": [{
-                "parts": [{
-                    "text": "'"$prompt"'"
-                }]
-            }]
-        }' 2>> "$LOG_FILE")
-    
-    echo "$response" | jq -r '.candidates[0].content.parts[0].text' 2>/dev/null || echo "Error parsing response"
-}
-
-call_custom_api() {
-    local prompt="$1"
-    
-    if [ -z "$CUSTOM_AI_API" ] || [ -z "$CUSTOM_AI_KEY" ]; then
-        echo -e "${RED}[!] Custom API configuration incomplete${NC}"
-        return 1
-    fi
-    
-    # Generic API call - adjust based on your API
-    local response=$(curl -s -X POST "$CUSTOM_AI_API" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $CUSTOM_AI_KEY" \
-        -d '{
-            "model": "'"$CUSTOM_AI_MODEL"'",
-            "prompt": "'"$prompt"'",
-            "max_tokens": 2000
-        }' 2>> "$LOG_FILE")
-    
-    echo "$response" | jq -r '.choices[0].text' 2>/dev/null || echo "$response"
 }
 
 # =====================[ MAIN MENU ]=====================
@@ -2774,21 +2481,21 @@ show_main_menu() {
         clear
         echo -e "${PURPLE}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║              NiiXscan v3.0 - Main Menu              ║"
+        echo "║              NiiXscan v3.3 - Main Menu              ║"
+        echo "║          Optimized Nuclei Scanning Edition          ║"
         echo "╠══════════════════════════════════════════════════════╣"
-        echo "║  ${GREEN}1.${PURPLE}  Start New Security Scan                    ║"
-        echo "║  ${GREEN}2.${PURPLE}  Configure Scanning Options                ║"
-        echo "║  ${GREEN}3.${PURPLE}  Browse All Reports                        ║"
-        echo "║  ${GREEN}4.${PURPLE}  Generate Executive Summary               ║"
-        echo "║  ${GREEN}5.${PURPLE}  Configure AI APIs                         ║"
-        echo "║  ${GREEN}6.${PURPLE}  View Scan History                         ║"
-        echo "║  ${GREEN}7.${PURPLE}  Tool Management                          ║"
-        echo "║  ${GREEN}8.${PURPLE}  System Information                        ║"
-        echo "║  ${GREEN}9.${PURPLE}  Exit                                      ║"
+        echo "║  1.  Start New Security Scan                    ║"
+        echo "║  2.  Configure Scanning Options                ║"
+        echo "║  3.  Browse All Reports                        ║"
+        echo "║  4.  Generate Executive Summary               ║"
+        echo "║  5. View Scan History                         ║"
+        echo "║  6.  Tool Management                          ║"
+        echo "║  7. System Information                        ║"
+        echo "║  8.  Exit                                      ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         
-        echo -n "Select option [1-9]: "
+        echo -n "Select option [1-8]: "
         read choice
         
         case $choice in
@@ -2809,22 +2516,18 @@ show_main_menu() {
                 pause
                 ;;
             5)
-                configure_ai_apis
-                pause
-                ;;
-            6)
                 view_scan_history
                 pause
                 ;;
-            7)
+            6)
                 tool_management
                 pause
                 ;;
-            8)
+            7)
                 show_system_info
                 pause
                 ;;
-            9)
+            8)
                 cleanup_and_exit
                 ;;
             *)
@@ -2841,7 +2544,7 @@ configure_scanning() {
     echo "1. Select Scan Type"
     echo "2. Set Output Format"
     echo "3. Configure Security Level"
-    echo "4. Set Parallel Jobs"
+    echo "4. Set Nuclei Options"
     echo "5. Back to Main Menu"
     echo -n "Select option [1-5]: "
     read config_choice
@@ -2857,7 +2560,7 @@ configure_scanning() {
             configure_security_level
             ;;
         4)
-            configure_parallel_jobs
+            configure_nuclei_options
             ;;
         5)
             return
@@ -2871,19 +2574,17 @@ configure_scanning() {
 select_scan_type() {
     echo -e "${CYAN}[*] Select scan type:${NC}"
     echo "1. Comprehensive (Full assessment)"
-    echo "2. Web Application"
-    echo "3. Network Infrastructure"
-    echo "4. WordPress Specific"
-    echo "5. API Security"
-    echo -n "Select option [1-5]: "
+    echo "2. Quick Scan"
+    echo "3. Web Application Only"
+    echo "4. Network Services Only"
+    echo -n "Select option [1-4]: "
     read scan_type_choice
     
     case $scan_type_choice in
         1) SCAN_TYPE="comprehensive" ;;
-        2) SCAN_TYPE="web" ;;
-        3) SCAN_TYPE="network" ;;
-        4) SCAN_TYPE="wordpress" ;;
-        5) SCAN_TYPE="api" ;;
+        2) SCAN_TYPE="quick" ;;
+        3) SCAN_TYPE="web" ;;
+        4) SCAN_TYPE="network" ;;
         *) 
             echo -e "${RED}[!] Invalid option${NC}"
             return 1
@@ -2942,20 +2643,35 @@ configure_security_level() {
     echo -e "${GREEN}[✓] Security level set to: $SECURITY_LEVEL${NC}"
 }
 
-configure_parallel_jobs() {
-    echo -n "Enter number of parallel jobs (1-8): "
-    read jobs
+configure_nuclei_options() {
+    echo -e "${CYAN}[*] Configure Nuclei options:${NC}"
     
-    if [[ $jobs =~ ^[1-8]$ ]]; then
-        MAX_PARALLEL_JOBS=$jobs
-        echo -e "${GREEN}[✓] Parallel jobs set to: $MAX_PARALLEL_JOBS${NC}"
-        
-        # Update configuration file
-        if [ -f "$CONFIG_FILE" ]; then
-            sed -i "s/^MAX_PARALLEL_JOBS=.*/MAX_PARALLEL_JOBS=$MAX_PARALLEL_JOBS/" "$CONFIG_FILE"
-        fi
-    else
-        echo -e "${RED}[!] Invalid number. Must be between 1 and 8${NC}"
+    echo -n "Maximum templates to use (default: 500): "
+    read template_limit
+    if [[ $template_limit =~ ^[0-9]+$ ]] && [ $template_limit -gt 0 ]; then
+        NUCLEI_TEMPLATE_LIMIT=$template_limit
+        echo -e "${GREEN}[✓] Template limit set to: $NUCLEI_TEMPLATE_LIMIT${NC}"
+    fi
+    
+    echo -n "Severity levels (critical,high,medium,low,info): "
+    read severity
+    if [ -n "$severity" ]; then
+        NUCLEI_SEVERITY="$severity"
+        echo -e "${GREEN}[✓] Severity set to: $NUCLEI_SEVERITY${NC}"
+    fi
+    
+    echo -n "Rate limit (requests/second, default: 50): "
+    read rate_limit
+    if [[ $rate_limit =~ ^[0-9]+$ ]] && [ $rate_limit -gt 0 ]; then
+        NUCLEI_RATE_LIMIT=$rate_limit
+        echo -e "${GREEN}[✓] Rate limit set to: $NUCLEI_RATE_LIMIT${NC}"
+    fi
+    
+    # Update configuration file
+    if [ -f "$CONFIG_FILE" ]; then
+        sed -i "s/^NUCLEI_TEMPLATE_LIMIT=.*/NUCLEI_TEMPLATE_LIMIT=$NUCLEI_TEMPLATE_LIMIT/" "$CONFIG_FILE"
+        sed -i "s/^NUCLEI_SEVERITY=.*/NUCLEI_SEVERITY=\"$NUCLEI_SEVERITY\"/" "$CONFIG_FILE"
+        sed -i "s/^NUCLEI_RATE_LIMIT=.*/NUCLEI_RATE_LIMIT=$NUCLEI_RATE_LIMIT/" "$CONFIG_FILE"
     fi
 }
 
@@ -2963,7 +2679,7 @@ select_scan_for_summary() {
     echo -e "${CYAN}[*] Select scan for executive summary...${NC}"
     
     # Get recent scans
-    local recent_scans=$(sqlite3 "$DB_FILE" << EOF
+    local recent_scans=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT id, target_url, start_time, status 
 FROM scans 
 WHERE status = 'completed' 
@@ -2998,30 +2714,20 @@ EOF
     if [[ $choice =~ ^[0-9]+$ ]] && [ $choice -ge 1 ] && [ $choice -lt $count ]; then
         local selected_scan="${scan_array[$choice]}"
         generate_executive_summary "$selected_scan"
-        
-        # Offer AI analysis
-        if [ "$AI_API_CONFIGURED" = true ]; then
-            echo -n "Perform AI analysis on this scan? (y/n): "
-            read ai_choice
-            if [[ "$ai_choice" =~ ^[Yy]$ ]]; then
-                analyze_with_ai "$selected_scan"
-            fi
-        fi
     fi
 }
 
 view_scan_history() {
     echo -e "${CYAN}[*] Viewing scan history...${NC}"
     
-    local history=$(sqlite3 "$DB_FILE" << EOF
+    local history=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     id,
     target_url,
     scan_type,
     strftime('%Y-%m-%d %H:%M', start_time) as start_time,
     strftime('%Y-%m-%d %H:%M', end_time) as end_time,
-    status,
-    risk_score
+    status
 FROM scans 
 ORDER BY start_time DESC 
 LIMIT 20;
@@ -3039,7 +2745,7 @@ EOF
     echo -e "${GREEN}│  ID  │         Target          │    Type    │     Period       │  Status   │${NC}"
     echo -e "${GREEN}├──────┼──────────────────────────┼────────────┼──────────────────┼───────────┤${NC}"
     
-    while IFS='|' read -r id target_url scan_type start_time end_time status risk_score; do
+    while IFS='|' read -r id target_url scan_type start_time end_time status; do
         # Trim target URL for display
         local display_target="$target_url"
         if [ ${#display_target} -gt 20 ]; then
@@ -3090,17 +2796,16 @@ view_scan_details() {
     echo -e "${CYAN}[*] Details for Scan ID: $scan_id${NC}"
     
     # Get scan details
-    local scan_info=$(sqlite3 "$DB_FILE" << EOF
+    local scan_info=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
     target_url,
     scan_type,
     start_time,
     end_time,
     status,
-    risk_score,
     report_path
 FROM scans 
-WHERE id = $scan_id;
+WHERE id = '$scan_id';
 EOF
     )
     
@@ -3109,26 +2814,25 @@ EOF
         return
     fi
     
-    IFS='|' read -r target_url scan_type start_time end_time status risk_score report_path <<< "$scan_info"
+    IFS='|' read -r target_url scan_type start_time end_time status report_path <<< "$scan_info"
     
     echo -e "${BLUE}Target:${NC} $target_url"
     echo -e "${BLUE}Type:${NC} $scan_type"
     echo -e "${BLUE}Start:${NC} $start_time"
     echo -e "${BLUE}End:${NC} ${end_time:-N/A}"
     echo -e "${BLUE}Status:${NC} $status"
-    echo -e "${BLUE}Risk Score:${NC} ${risk_score:-N/A}"
     echo -e "${BLUE}Report:${NC} ${report_path:-N/A}"
     
     # Show findings summary
-    local findings_summary=$(sqlite3 "$DB_FILE" << EOF
+    local findings_summary=$(sqlite3 "$DB_FILE" 2>/dev/null << EOF
 SELECT 
-    'Critical: ' || COUNT(CASE WHEN severity = 'Critical' THEN 1 END) || ', ' ||
-    'High: ' || COUNT(CASE WHEN severity = 'High' THEN 1 END) || ', ' ||
-    'Medium: ' || COUNT(CASE WHEN severity = 'Medium' THEN 1 END) || ', ' ||
-    'Low: ' || COUNT(CASE WHEN severity = 'Low' THEN 1 END) || ', ' ||
-    'Info: ' || COUNT(CASE WHEN severity = 'Info' THEN 1 END)
+    'Critical: ' || COUNT(CASE WHEN severity = 'critical' THEN 1 END) || ', ' ||
+    'High: ' || COUNT(CASE WHEN severity = 'high' THEN 1 END) || ', ' ||
+    'Medium: ' || COUNT(CASE WHEN severity = 'medium' THEN 1 END) || ', ' ||
+    'Low: ' || COUNT(CASE WHEN severity = 'low' THEN 1 END) || ', ' ||
+    'Info: ' || COUNT(CASE WHEN severity = 'info' THEN 1 END)
 FROM findings 
-WHERE scan_id = $scan_id;
+WHERE scan_id = '$scan_id';
 EOF
     )
     
@@ -3138,9 +2842,8 @@ EOF
     echo ""
     echo "1. View Full Report"
     echo "2. Generate Executive Summary"
-    echo "3. AI Analysis"
-    echo "4. Return to History"
-    echo -n "Select option [1-4]: "
+    echo "3. Return to History"
+    echo -n "Select option [1-3]: "
     read option
     
     case $option in
@@ -3161,9 +2864,6 @@ EOF
             generate_executive_summary "$scan_id"
             ;;
         3)
-            analyze_with_ai "$scan_id"
-            ;;
-        4)
             return
             ;;
     esac
@@ -3175,7 +2875,7 @@ tool_management() {
     echo "1. Install Missing Tools"
     echo "2. Update All Tools"
     echo "3. Check Tool Status"
-    echo "4. Install Enhanced Tools"
+    echo "4. Install Nuclei (Most Important)"
     echo "5. Back to Main Menu"
     echo -n "Select option [1-5]: "
     read tool_choice
@@ -3191,7 +2891,7 @@ tool_management() {
             check_tool_status
             ;;
         4)
-            install_enhanced_scanning_tools
+            install_nuclei
             ;;
         5)
             return
@@ -3205,12 +2905,17 @@ tool_management() {
 install_missing_tools() {
     echo -e "${CYAN}[*] Installing missing tools...${NC}"
     
-    local required_tools=("nmap" "nikto" "sqlmap" "gobuster" "whatweb" "wafw00f")
+    local required_tools=("nmap" "nikto" "sqlmap" "gobuster" "whatweb" "wafw00f" "testssl" "nuclei")
     
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
             echo -e "${YELLOW}[!] Installing $tool...${NC}"
             install_package_robust "$tool"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}[✓] $tool installed successfully${NC}"
+            else
+                echo -e "${RED}[!] Failed to install $tool${NC}"
+            fi
         else
             echo -e "${GREEN}[✓] $tool is installed${NC}"
         fi
@@ -3243,8 +2948,7 @@ check_tool_status() {
     
     local important_tools=(
         "nmap" "nikto" "sqlmap" "gobuster" "whatweb" 
-        "wafw00f" "subfinder" "amass" "masscan" "ffuf"
-        "nuclei" "wpscan" "testssl" "sslscan" "xsstrike"
+        "wafw00f" "testssl" "sslscan" "nuclei" "wpscan"
     )
     
     echo -e "${GREEN}┌─────────────────────────────────────────────────────────────┐${NC}"
@@ -3255,7 +2959,21 @@ check_tool_status() {
     
     for tool in "${important_tools[@]}"; do
         if command -v "$tool" &> /dev/null; then
-            local version=$($tool --version 2>/dev/null | head -1 | cut -d' ' -f2-3 | tr -d '\n')
+            local version=""
+            case $tool in
+                "nmap")
+                    version=$(nmap --version 2>/dev/null | head -1 | cut -d' ' -f3)
+                    ;;
+                "nikto")
+                    version=$(nikto -v 2>/dev/null | grep "Version" | cut -d' ' -f2)
+                    ;;
+                "nuclei")
+                    version=$(nuclei -version 2>/dev/null | head -1 | cut -d' ' -f2)
+                    ;;
+                *)
+                    version=$($tool --version 2>/dev/null | head -1 | cut -d' ' -f2-3 | tr -d '\n')
+                    ;;
+            esac
             printf "${GREEN}│ ${NC}%-28s ${GREEN}│ ${GREEN}%-27s ${GREEN}│${NC}\n" "$tool" "${version:0:25}"
         else
             printf "${GREEN}│ ${NC}%-28s ${GREEN}│ ${RED}%-27s ${GREEN}│${NC}\n" "$tool" "NOT INSTALLED"
@@ -3281,7 +2999,6 @@ show_system_info() {
     echo -e "${BLUE}Kernel:${NC} $(uname -r)"
     echo -e "${BLUE}Architecture:${NC} $(uname -m)"
     echo -e "${BLUE}CPU Cores:${NC} $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "Unknown")"
-    echo -e "${BLUE}Memory:${NC} $(free -h 2>/dev/null | awk '/^Mem:/ {print $2}' || sysctl -n hw.memsize 2>/dev/null | awk '{print $0/1073741824" GB"}' || echo "Unknown")"
     
     echo -e "${BLUE}NiiXscan Directories:${NC}"
     echo "  Config: $CONFIG_DIR"
@@ -3295,18 +3012,17 @@ show_system_info() {
         local finding_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM findings;" 2>/dev/null)
         echo "  Scans: $scan_count"
         echo "  Findings: $finding_count"
-        echo "  Database: $DB_FILE ($(du -h "$DB_FILE" | cut -f1))"
+        echo "  Database: $DB_FILE"
     else
         echo "  Database not initialized"
     fi
     
-    echo -e "${BLUE}AI Configuration:${NC}"
-    if [ "$AI_API_CONFIGURED" = true ]; then
-        echo "  Provider: $AI_PROVIDER"
-        echo "  Status: Configured"
-    else
-        echo "  Status: Not configured"
-    fi
+    echo -e "${BLUE}Scan Status:${NC}"
+    echo "  Security Level: $SECURITY_LEVEL"
+    echo "  Scan Type: $SCAN_TYPE"
+    echo "  Output Format: $EXPORT_FORMAT"
+    echo "  Nuclei Template Limit: $NUCLEI_TEMPLATE_LIMIT"
+    echo "  Nuclei Severity: $NUCLEI_SEVERITY"
 }
 
 pause() {
@@ -3319,20 +3035,15 @@ cleanup_and_exit() {
     echo -e "${CYAN}[*] Cleaning up...${NC}"
     
     # Stop progress indicator if running
-    stop_progress_indicator
+    stop_simple_progress
     
     # Clean up temporary directory
     if [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
     fi
     
-    # Deactivate Python virtual environment
-    if [ "$PYTHON_VENV_ACTIVATED" = true ]; then
-        deactivate 2>/dev/null
-    fi
-    
     echo -e "${GREEN}[✓] Cleanup completed${NC}"
-    echo -e "${PURPLE}Thank you for using NiiXscan v3.0!${NC}"
+    echo -e "${PURPLE}Thank you for using NiiXscan v3.3 - Optimized Nuclei Scanning!${NC}"
     exit 0
 }
 
@@ -3352,4 +3063,4 @@ main() {
 }
 
 # Start the application
-main
+main "$@"

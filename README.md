@@ -1,8 +1,9 @@
-# niixscan
-automated vulnerability scanner by NiiX
+!! FOR LEGAL USE ONLY i take ZERO/NO RESPONSSIBILITY FOR THE ACTIONS OF OTHERS !!
 
-it works, but with errors (needs user input and backend config) and with having some dependancies pre installed. Not Production version.
+work in progress
 
+love chillis, love it hot
 
+work in progress
 
-!!! FOR LEGAL USE ONLY, I TAKLE ZERO/NO RESPONSSIBILITY FOR MISSUSE !!!
+!! FOR LEGAL USE ONLY i take ZERO/NO RESPONSSIBILITY FOR THE ACTIONS OF OTHERS !!

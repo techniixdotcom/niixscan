@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+
+# NiiX Scan - APT 
+# Created by: cuteLiLi / techniix
+# Version: beta 1.61
+
 import os
 import subprocess
 import sys

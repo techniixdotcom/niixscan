@@ -2,7 +2,7 @@
 
 # NiiX Scan - APT 
 # Created by: cuteLiLi / techniix
-# Version: beta 1.61
+# Version: working on it ... not working
 
 import os
 import subprocess
